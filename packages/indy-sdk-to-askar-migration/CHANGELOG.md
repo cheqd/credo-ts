@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- 70c849d: update target for tsc compiler to ES2020. Generally this should not have an impact for the supported environments (Node.JS / React Native). However this will have to be tested in React Native
+
+### Patch Changes
+
+- 13cd8cb: feat: support node 22
+- Updated dependencies [2d10ec3]
+- Updated dependencies [13cd8cb]
+- Updated dependencies [14673b1]
+- Updated dependencies [607659a]
+- Updated dependencies [5f08bc6]
+- Updated dependencies [2d10ec3]
+- Updated dependencies [70c849d]
+- Updated dependencies [897c834]
+- Updated dependencies [edd2edc]
+- Updated dependencies [e80794b]
+  - @credo-ts/core@0.6.0
+  - @credo-ts/node@0.6.0
+  - @credo-ts/anoncreds@0.6.0
+  - @credo-ts/askar@0.6.0
+
 ## 0.5.13
 
 ### Patch Changes

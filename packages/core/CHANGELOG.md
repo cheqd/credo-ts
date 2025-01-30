@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- 14673b1: Remove dependency on `abort-controller` library. Abort Controller has been supported on all platforms for quite some time already.
+- 5f08bc6: feat: allow dynamicaly providing x509 certificates for all types of verifications
+- 70c849d: update target for tsc compiler to ES2020. Generally this should not have an impact for the supported environments (Node.JS / React Native). However this will have to be tested in React Native
+- 897c834: DIDComm has been extracted out of the Core. This means that now all DIDComm related modules (e.g. proofs, credentials) must be explicitly added when creating an `Agent` instance. Therefore, their API will be accesable under `agent.modules.[moduleAPI]` instead of `agent.[moduleAPI]`. Some `Agent` DIDComm-related properties and methods where also moved to the API of a new DIDComm module (e.g. `agent.registerInboundTransport` turned into `agent.modules.didcomm.registerInboundTransport`).
+
+  **Example of DIDComm Agent**
+
+  Previously:
+
+  ```ts
+       const config = {
+        label: name,
+        endpoints: ['https://myendpoint'],
+        walletConfig: {
+          id: name,
+          key: name,
+        },
+      } satisfies InitConfig
+
+      const agent = new Agent({
+        config,
+        dependencies: agentDependencies,
+        modules: {
+          connections: new ConnectionsModule({
+             autoAcceptConnections: true,
+          })
+        })
+      this.agent.registerInboundTransport(new HttpInboundTransport({ port }))
+      this.agent.registerOutboundTransport(new HttpOutboundTransport())
+
+  ```
+
+  Now:
+
+  ```ts
+       const config = {
+        label: name,
+        walletConfig: {
+          id: name,
+          key: name,
+        },
+      } satisfies InitConfig
+
+      const agent = new Agent({
+        config,
+        dependencies: agentDependencies,
+        modules: {
+          ...getDefaultDidcommModules({ endpoints: ['https://myendpoint'] }),
+          connections: new ConnectionsModule({
+             autoAcceptConnections: true,
+          })
+        })
+      agent.modules.didcomm.registerInboundTransport(new HttpInboundTransport({ port }))
+      agent.modules.didcomm.registerOutboundTransport(new HttpOutboundTransport())
+  ```
+
+### Patch Changes
+
+- 2d10ec3: fix: presentation exchange handling when multiple mdocs in presentation definition
+- 13cd8cb: feat: support node 22
+- 607659a: feat: fetch sd-jwt type metadata
+- 2d10ec3: fix: issue where all available credentials were selected for queried DIF PEX definition. Now it only selects `needsCount` credentials, so it won't disclose more credentials than neccesary.
+- edd2edc: feat(mdoc): support creating device response with multiple mdocs for usage in proximity flow
+- e80794b: fix: error during shutdown of agent in React Native due to usage of unavailable event method on socket `.once`
+
 ## 0.5.13
 
 ### Patch Changes
