@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- e25c00f: Dynamic module initialization
+
+### Patch Changes
+
+- Updated dependencies [9f9c815]
+  - @credo-ts/core@0.6.0
+  - @credo-ts/anoncreds@0.6.0
+
 ## 0.5.19
 
 ### Patch Changes
