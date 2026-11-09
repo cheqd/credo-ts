@@ -148,6 +148,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Services are started in the background earlier, wait until they are healthy
+      # (the cheqd localnet is only healthy once accounts are funded and the oracle can price fees)
+      - name: Wait for services
+        run: docker compose up -d --wait --wait-timeout 600 --no-recreate
+
       - name: Run tests
         run: COLLECT_FAILED_TEST_LOGS=true pnpm test:e2e --coverage
 
