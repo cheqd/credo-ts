@@ -42,6 +42,7 @@ import { CheqdLedgerService } from '../ledger'
 import {
   createMsgCreateDidDocPayloadToSign,
   createMsgDeactivateDidDocPayloadToSign,
+  decodeBase64OrBase64Url,
   generateDidDoc,
   validateSpecCompliantPayload,
 } from './didCheqdUtil'
@@ -578,7 +579,7 @@ export class CheqdDidRegistrar implements DidRegistrar {
     try {
       let data: Uint8Array
       if (typeof resource.data === 'string') {
-        data = TypedArrayEncoder.fromBase64(resource.data)
+        data = decodeBase64OrBase64Url(resource.data)
       } else if (typeof resource.data === 'object') {
         data = TypedArrayEncoder.fromUtf8String(JSON.stringify(resource.data))
       } else {
