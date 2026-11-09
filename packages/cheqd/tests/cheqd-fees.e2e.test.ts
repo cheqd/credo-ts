@@ -1,5 +1,5 @@
-import { CheqdNetwork, createCheqdSDK, DIDModule, ResourceModule } from '@cheqd/sdk'
 import type { AbstractCheqdSDKModule } from '@cheqd/sdk'
+import { CheqdNetwork, createCheqdSDK, DIDModule, ResourceModule } from '@cheqd/sdk'
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing'
 
 // Read-only: queries live chain parameters and the Oracle, never signs or broadcasts.
