@@ -67,6 +67,89 @@ describe('Cheqd DID registrar', () => {
     })
   })
 
+  describe('P-256 keys', () => {
+    it('should create, update and deactivate a did:cheqd using a P-256 key created by the registrar', async () => {
+      const createResult = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: {
+          createKey: { type: { kty: 'EC', crv: 'P-256' } },
+          network: 'testnet',
+        },
+      })
+      expect(createResult).toMatchObject({
+        didState: {
+          state: 'finished',
+          didDocument: {
+            verificationMethod: [{ type: 'JsonWebKey2020', publicKeyJwk: { kty: 'EC', crv: 'P-256' } }],
+          },
+        },
+      })
+      const did = createResult.didState.did as string
+      const didDocument = createResult.didState.didDocument as DidDocument
+
+      const resolved = await agent.dids.resolve(did)
+      expect(resolved.didDocument?.verificationMethod?.[0]).toMatchObject({
+        type: 'JsonWebKey2020',
+        publicKeyJwk: { kty: 'EC', crv: 'P-256' },
+      })
+
+      // Updating signs again with the P-256 key (DER-encoded ECDSA)
+      didDocument.service = [validService(did)]
+      const updateResult = await agent.dids.update<CheqdDidUpdateOptions>({ did, didDocument, options: {} })
+      expect(updateResult.didState.state).toBe('finished')
+
+      const deactivateResult = await agent.dids.deactivate({ did })
+      expect(deactivateResult.didState.state).toBe('finished')
+    })
+
+    it('should create a did:cheqd using an existing P-256 kms key', async () => {
+      const key = await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })
+      const result = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { keyId: key.keyId, network: 'testnet' },
+      })
+      expect(result.didState.state).toBe('finished')
+    })
+
+    it('should add a P-256 key as verification method when updating', async () => {
+      const createResult = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { createKey: { type: { kty: 'EC', crv: 'P-256' } }, network: 'testnet' },
+      })
+      const did = createResult.didState.did as string
+      const didDocument = createResult.didState.didDocument as DidDocument
+
+      const updateResult = await agent.dids.update<CheqdDidUpdateOptions>({
+        did,
+        didDocument,
+        options: { createKey: { type: { kty: 'EC', crv: 'P-256' } } },
+      })
+      expect(updateResult.didState.state).toBe('finished')
+      expect(updateResult.didState.didDocument?.verificationMethod).toHaveLength(2)
+    })
+
+    it('should fail for base58btc identifiers with a P-256 key', async () => {
+      const result = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: {
+          createKey: { type: { kty: 'EC', crv: 'P-256' } },
+          network: 'testnet',
+          methodSpecificIdAlgo: 'base58btc',
+        },
+      })
+      expect(result.didState).toMatchObject({ state: 'failed' })
+    })
+
+    it('should fail for an existing kms key with an unsupported curve', async () => {
+      const key = await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-384' } })
+      const result = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { keyId: key.keyId, network: 'testnet' },
+      })
+      expect(result.didState).toMatchObject({ state: 'failed' })
+    })
+  })
+
   it('should create a did:cheqd using Ed25519VerificationKey2020', async () => {
     const did = await agent.dids.create<CheqdDidCreateOptions>({
       method: 'cheqd',
