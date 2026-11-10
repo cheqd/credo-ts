@@ -163,7 +163,8 @@ describe('Cheqd DID resolver', () => {
 
     it('resolves the version that was current at a given time', async () => {
       const first = await resolve('resourceName=Versioned%20Name&resourceType=versioned&version=v1')
-      const createdAt = Math.floor((first.resourceMetadata?.created as Date).getTime() / 1000)
+      if (!first.resourceMetadata) throw new Error('Expected resource metadata')
+      const createdAt = Math.floor(first.resourceMetadata.created.getTime() / 1000)
 
       // at the time the first version was created, the first version is the latest
       const result = await resolve(
