@@ -1,8 +1,10 @@
+import { generateKeyPairSync } from 'node:crypto'
 import type { DidDocument } from '@credo-ts/core'
 import {
   Agent,
   DidCommV1Service,
   DidDocumentBuilder,
+  DidRepository,
   getEd25519VerificationKey2018,
   getJsonWebKey2020,
   Kms,
@@ -147,6 +149,112 @@ describe('Cheqd DID registrar', () => {
         options: { keyId: key.keyId, network: 'testnet' },
       })
       expect(result.didState).toMatchObject({ state: 'failed' })
+    })
+  })
+
+  describe('updating a did', () => {
+    // Same payer as the rest of this file, so the writes run in order and cannot race on the account sequence
+    const rotateTo = async (did: string, keys?: boolean) => {
+      const newKey = await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })
+      const newKeyUrl = `${did}#key-2`
+      const rotated = new DidDocumentBuilder(did)
+        .addContext('https://w3id.org/security/suites/jws-2020/v1')
+        .addVerificationMethod(
+          getJsonWebKey2020({
+            did,
+            publicJwk: Kms.PublicJwk.fromPublicJwk(newKey.publicJwk),
+            verificationMethodId: newKeyUrl,
+          })
+        )
+        .addAuthentication(newKeyUrl)
+        .addAssertionMethod(newKeyUrl)
+        .build()
+      const update = await agent.dids.update<CheqdDidUpdateOptions>({
+        did,
+        didDocument: rotated,
+        options: keys === false ? {} : { keys: [{ didDocumentRelativeKeyId: '#key-2', kmsKeyId: newKey.keyId }] },
+      })
+      return { update, newKeyUrl }
+    }
+
+    it('rotates the authentication key of a did to a new P-256 key and signs a further update with it', async () => {
+      const created = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { createKey: { type: { kty: 'EC', crv: 'P-256' } }, network: 'testnet' },
+      })
+      const did = created.didState.did as string
+      const oldJwk = (created.didState.didDocument as DidDocument).verificationMethod?.[0].publicKeyJwk
+
+      const { update, newKeyUrl } = await rotateTo(did)
+      expect(update.didState, JSON.stringify(update.didState)).toMatchObject({ state: 'finished' })
+
+      const resolved = await agent.dids.resolve(did)
+      const methods = resolved.didDocument?.verificationMethod ?? []
+      expect(methods).toHaveLength(1)
+      expect(methods[0].id).toBe(newKeyUrl)
+      expect(methods[0].publicKeyJwk).not.toEqual(oldJwk)
+
+      const second = await agent.dids.update<CheqdDidUpdateOptions>({
+        did,
+        didDocument: resolved.didDocument as DidDocument,
+        options: {},
+      })
+      expect(second.didState).toMatchObject({ state: 'finished' })
+    })
+
+    // Dids created by older versions use an Ed25519VerificationKey2018 method named by the key fingerprint, a key
+    // stored under its legacy key id (the fingerprint), and a did record without key mappings.
+    describe('created the way older versions did', () => {
+      const createLegacyDid = async () => {
+        const { privateKey } = generateKeyPairSync('ed25519')
+        const jwk = privateKey.export({ format: 'jwk' }) as Kms.KmsJwkPrivateOkp
+        const publicJwk = Kms.PublicJwk.fromPublicJwk({ kty: 'OKP', crv: 'Ed25519', x: jwk.x })
+        await agent.kms.importKey({ privateJwk: { ...jwk, kid: publicJwk.legacyKeyId } as Kms.KmsJwkPrivate })
+
+        const did = `did:cheqd:testnet:${utils.uuid()}`
+        const keyUrl = `${did}#${publicJwk.fingerprint}`
+        const created = await agent.dids.create<CheqdDidCreateOptions>({
+          method: 'cheqd',
+          didDocument: new DidDocumentBuilder(did)
+            .addController(did)
+            .addAuthentication(keyUrl)
+            .addVerificationMethod(getEd25519VerificationKey2018({ publicJwk, controller: did, id: keyUrl }))
+            .build(),
+          options: {
+            keys: [{ didDocumentRelativeKeyId: `#${publicJwk.fingerprint}`, kmsKeyId: publicJwk.legacyKeyId }],
+          },
+        })
+        expect(created.didState.state).toBe('finished')
+
+        // An older did record has no key mappings
+        const repository = agent.dependencyManager.resolve(DidRepository)
+        const record = await repository.findCreatedDid(agent.context, did)
+        if (!record) throw new Error('did record not found')
+        record.keys = undefined
+        await repository.update(agent.context, record)
+
+        return { did, keyUrl, document: created.didState.didDocument as DidDocument }
+      }
+
+      it('updates the did, signing with the key found by its legacy key id', async () => {
+        const { did, document } = await createLegacyDid()
+
+        document.service = [validService(did)]
+        const update = await agent.dids.update<CheqdDidUpdateOptions>({ did, didDocument: document, options: {} })
+        expect(update.didState, JSON.stringify(update.didState)).toMatchObject({ state: 'finished' })
+      })
+
+      it('rotates the authentication key of the did', async () => {
+        const { did, keyUrl } = await createLegacyDid()
+
+        const { update, newKeyUrl } = await rotateTo(did)
+        expect(update.didState, JSON.stringify(update.didState)).toMatchObject({ state: 'finished' })
+
+        const resolved = await agent.dids.resolve(did)
+        const ids = resolved.didDocument?.verificationMethod?.map((method) => method.id)
+        expect(ids).toEqual([newKeyUrl])
+        expect(ids).not.toContain(keyUrl)
+      })
     })
   })
 

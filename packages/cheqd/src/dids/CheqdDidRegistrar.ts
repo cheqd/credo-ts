@@ -346,7 +346,9 @@ export class CheqdDidRegistrar implements DidRegistrar {
 
         previousDocument = resolvedDocument.didDocument as DIDDocument
 
-        const keys = didRecord.keys ?? []
+        // Older did records have no keys. Set them on the record, so keys added below are saved with it
+        didRecord.keys = didRecord.keys ?? []
+        const keys = didRecord.keys
         // Link did document keys to kms keys, replacing an existing entry for the same did document key
         for (const key of options.options?.keys ?? []) {
           const index = keys.findIndex((k) => k.didDocumentRelativeKeyId === key.didDocumentRelativeKeyId)
