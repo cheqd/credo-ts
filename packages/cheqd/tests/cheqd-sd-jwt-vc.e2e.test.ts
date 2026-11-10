@@ -4,8 +4,10 @@ import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions } from '../src'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 
-// Payer seed [4] is unused elsewhere
-const agent = new Agent(getAgentOptions('SD-JWT VC lifecycle', {}, {}, getCheqdModules(cheqdPayerSeeds[4])))
+// Payer seed [4] is unused elsewhere. The holder has no cheqd module: it never touches the ledger.
+const issuer = new Agent(getAgentOptions('SD-JWT VC issuer', {}, {}, getCheqdModules(cheqdPayerSeeds[4])))
+const holder = new Agent(getAgentOptions('SD-JWT VC holder', {}, {}, {}))
+const verifier = new Agent(getAgentOptions('SD-JWT VC verifier', {}, {}, getCheqdModules(cheqdPayerSeeds[4])))
 
 describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   let issuerDidUrl: string
@@ -13,18 +15,18 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   let holderKmsKeyId: string
 
   beforeAll(async () => {
-    await agent.initialize()
+    await Promise.all([issuer.initialize(), holder.initialize(), verifier.initialize()])
 
-    const created = await agent.dids.create<CheqdDidCreateOptions>({
+    const created = await issuer.dids.create<CheqdDidCreateOptions>({
       method: 'cheqd',
       options: { createKey: { type: { kty: 'EC', crv: 'P-256' } }, network: 'testnet' },
     })
     expect(created.didState.state).toBe('finished')
     issuerDidUrl = `${created.didState.did}#key-1`
 
-    // The holder key is a separate P-256 key (same agent for the test, so this does not show cross-agent holding)
-    const holderKey = await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })
-    const issued = await agent.sdJwtVc.sign({
+    // The holder creates its own key and shares only the public key with the issuer
+    const holderKey = await holder.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })
+    const issued = await issuer.sdJwtVc.sign({
       payload: { vct: 'https://example.com/vct/test', given_name: 'Alice', family_name: 'Doe', age: 30 },
       issuer: { method: 'did', didUrl: issuerDidUrl },
       holder: { method: 'jwk', jwk: Kms.PublicJwk.fromPublicJwk(holderKey.publicJwk) },
@@ -35,7 +37,7 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   })
 
   afterAll(async () => {
-    await agent.shutdown()
+    await Promise.all([issuer.shutdown(), holder.shutdown(), verifier.shutdown()])
   })
 
   const verifierMetadata = {
@@ -45,19 +47,19 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   }
 
   it('issues, then verifies the issuer signature through did:cheqd resolution', async () => {
-    const result = await agent.sdJwtVc.verify({ compactSdJwtVc: compact })
+    const result = await verifier.sdJwtVc.verify({ compactSdJwtVc: compact })
     expect(result.isValid).toBe(true)
     expect(result.sdJwtVc?.header.alg).toBe('ES256')
   })
 
   it('presents selectively with a key binding JWT and verifies it', async () => {
-    const presentation = await agent.sdJwtVc.present({
-      sdJwtVc: { ...agent.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
+    const presentation = await holder.sdJwtVc.present({
+      sdJwtVc: { ...holder.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
       presentationFrame: { given_name: true },
       verifierMetadata,
     })
 
-    const result = await agent.sdJwtVc.verify({
+    const result = await verifier.sdJwtVc.verify({
       compactSdJwtVc: presentation,
       keyBinding: { audience: verifierMetadata.audience, nonce: verifierMetadata.nonce },
       requiredClaimKeys: ['given_name'],
@@ -70,19 +72,19 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   })
 
   it('rejects a presentation for a different nonce or audience', async () => {
-    const presentation = await agent.sdJwtVc.present({
-      sdJwtVc: { ...agent.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
+    const presentation = await holder.sdJwtVc.present({
+      sdJwtVc: { ...holder.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
       presentationFrame: { given_name: true },
       verifierMetadata,
     })
 
-    const wrongNonce = await agent.sdJwtVc.verify({
+    const wrongNonce = await verifier.sdJwtVc.verify({
       compactSdJwtVc: presentation,
       keyBinding: { audience: verifierMetadata.audience, nonce: 'other-nonce' },
     })
     expect(wrongNonce.isValid).toBe(false)
 
-    const wrongAudience = await agent.sdJwtVc.verify({
+    const wrongAudience = await verifier.sdJwtVc.verify({
       compactSdJwtVc: presentation,
       keyBinding: { audience: 'https://evil.example.com', nonce: verifierMetadata.nonce },
     })
@@ -90,11 +92,11 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   })
 
   it('rejects a presentation without a key binding JWT when one is required', async () => {
-    const noBinding = await agent.sdJwtVc.present({
-      sdJwtVc: { ...agent.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
+    const noBinding = await holder.sdJwtVc.present({
+      sdJwtVc: { ...holder.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
       presentationFrame: { given_name: true },
     })
-    const result = await agent.sdJwtVc.verify({
+    const result = await verifier.sdJwtVc.verify({
       compactSdJwtVc: noBinding,
       keyBinding: { audience: verifierMetadata.audience, nonce: verifierMetadata.nonce },
     })
@@ -102,12 +104,12 @@ describe('SD-JWT VC lifecycle with a did:cheqd P-256 issuer', () => {
   })
 
   it('rejects a presentation missing a required claim', async () => {
-    const presentation = await agent.sdJwtVc.present({
-      sdJwtVc: { ...agent.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
+    const presentation = await holder.sdJwtVc.present({
+      sdJwtVc: { ...holder.sdJwtVc.fromCompact(compact), kmsKeyId: holderKmsKeyId },
       presentationFrame: { given_name: true },
       verifierMetadata,
     })
-    const result = await agent.sdJwtVc.verify({
+    const result = await verifier.sdJwtVc.verify({
       compactSdJwtVc: presentation,
       keyBinding: { audience: verifierMetadata.audience, nonce: verifierMetadata.nonce },
       requiredClaimKeys: ['family_name'],
