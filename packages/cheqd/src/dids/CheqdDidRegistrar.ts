@@ -314,6 +314,7 @@ export class CheqdDidRegistrar implements DidRegistrar {
     const versionId = options.options?.versionId || utils.uuid()
     let didDocument: DidDocument
     let didRecord: DidRecord | null
+    let previousDocument: DIDDocument | undefined
 
     try {
       if (options.didDocument) {
@@ -343,7 +344,15 @@ export class CheqdDidRegistrar implements DidRegistrar {
           }
         }
 
+        previousDocument = resolvedDocument.didDocument as DIDDocument
+
         const keys = didRecord.keys ?? []
+        // Link did document keys to kms keys, replacing an existing entry for the same did document key
+        for (const key of options.options?.keys ?? []) {
+          const index = keys.findIndex((k) => k.didDocumentRelativeKeyId === key.didDocumentRelativeKeyId)
+          if (index === -1) keys.push(key)
+          else keys[index] = key
+        }
         if (options.options?.createKey || options.options?.keyId) {
           const kms = agentContext.dependencyManager.resolve(Kms.KeyManagementApi)
           let createdKey: DidDocumentKey
@@ -435,6 +444,9 @@ export class CheqdDidRegistrar implements DidRegistrar {
         }
       }
 
+      // Keys of the previous version are still needed to sign for authentication entries that are removed
+      const previousKeys = [...(didRecord.keys ?? [])]
+
       // Filter out all keys that are not present in the did document anymore
       didRecord.keys = didRecord.keys?.filter(({ didDocumentRelativeKeyId }) => {
         try {
@@ -475,12 +487,20 @@ export class CheqdDidRegistrar implements DidRegistrar {
           },
         }
       }
+      // The ledger requires signatures from authentication entries of the previous version that are removed
+      const newAuthenticationIds = authentication.map((method) => method.id)
+      const removedAuthentication = (previousDocument?.authentication ?? [])
+        .map((entry) => (typeof entry === 'string' ? entry : entry.id))
+        .filter((id) => !newAuthenticationIds.includes(id))
+        .map((id) => previousDocument?.verificationMethod?.find((method) => method.id === id))
+        .filter((method) => method !== undefined)
+        .map((method) => JsonTransformer.fromJSON(method, VerificationMethod))
+
       const signInputs = await this.signPayload(
         agentContext,
         payloadToSign,
-        // TOOD: we should also sign with the authentication entries that are removed (so we should diff)
-        authentication,
-        didRecord.keys
+        [...authentication, ...removedAuthentication],
+        previousKeys
       )
 
       const response = await cheqdLedgerService.update(didDocument.toJSON() as DIDDocument, signInputs, versionId)
