@@ -216,6 +216,17 @@ export class CheqdLedgerService {
     return this.retryRead(() => sdk.queryLinkedResource(collectionId, resourceId))
   }
 
+  /** The latest version of a resource, in one request, however many resources the collection holds */
+  public async resolveLatestResource(
+    did: string,
+    collectionId: string,
+    name: string,
+    type: string
+  ): Promise<ResourceWithMetadata> {
+    const sdk = await this.getSdk(did)
+    return this.retryRead(() => sdk.queryLatestLinkedResourceVersion(collectionId, name, type))
+  }
+
   public async resolveCollectionResources(
     did: string,
     collectionId: string
