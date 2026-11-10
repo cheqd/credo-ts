@@ -109,9 +109,7 @@ describe('Agent card signing', () => {
   })
 
   it('does not verify a signature whose kid is not a DID URL', async () => {
-    const protectedHeader = Buffer.from(JSON.stringify({ alg: 'ES256', kid: 'my-key', typ: 'JOSE' })).toString(
-      'base64url'
-    )
+    const protectedHeader = JsonEncoder.toBase64Url({ alg: 'ES256', kid: 'my-key', typ: 'JOSE' })
     const result = await verifyAgentCardSignature(agent.context, {
       payload: 'x',
       signature: { protected: protectedHeader, signature: 'AAAA' },
@@ -128,7 +126,7 @@ describe('Agent card signing', () => {
     const claimed = JsonEncoder.fromBase64Url(signature.protected)
     const forged = {
       ...signature,
-      protected: Buffer.from(JSON.stringify({ ...claimed, kid: other.didUrl })).toString('base64url'),
+      protected: JsonEncoder.toBase64Url({ ...claimed, kid: other.didUrl }),
     }
     const result = await verifyAgentCardSignature(agent.context, { payload: 'payload', signature: forged })
     expect(result.isValid).toBe(false)
