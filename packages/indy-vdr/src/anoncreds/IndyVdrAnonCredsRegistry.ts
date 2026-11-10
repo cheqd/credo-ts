@@ -29,17 +29,7 @@ import type {
   RegisterSchemaReturnStateFinished,
   RegisterSchemaReturnStateWait,
 } from '@credo-ts/anoncreds'
-import {
-  AnonCredsRegistryService,
-  dateToTimestamp,
-  getUnqualifiedCredentialDefinitionId,
-  getUnqualifiedRevocationRegistryDefinitionId,
-  getUnqualifiedSchemaId,
-  parseIndyCredentialDefinitionId,
-  parseIndyDid,
-  parseIndyRevocationRegistryId,
-  parseIndySchemaId,
-} from '@credo-ts/anoncreds'
+import { AnonCredsRegistryService, dateToTimestamp } from '@credo-ts/anoncreds'
 import type { AgentContext } from '@credo-ts/core'
 import { CredoError } from '@credo-ts/core'
 import type { SchemaResponse } from '@hyperledger/indy-vdr-shared'
@@ -55,7 +45,7 @@ import {
   RevocationRegistryEntryRequest,
   SchemaRequest,
 } from '@hyperledger/indy-vdr-shared'
-import { verificationPublicJwkForIndyDid } from '../dids/didIndyUtil'
+import { parseIndyDid, verificationPublicJwkForIndyDid } from '../dids/didIndyUtil'
 import { IndyVdrPoolService } from '../pool'
 import { multiSignRequest } from '../utils/sign'
 import {
@@ -63,7 +53,13 @@ import {
   getDidIndyRevocationRegistryDefinitionId,
   getDidIndyRevocationRegistryEntryId,
   getDidIndySchemaId,
+  getIndyLedgerCredentialDefinitionId,
+  getIndyLedgerRevocationRegistryDefinitionId,
+  getIndyLedgerSchemaId,
   indyVdrAnonCredsRegistryIdentifierRegex,
+  parseIndyCredentialDefinitionId,
+  parseIndyRevocationRegistryId,
+  parseIndySchemaId,
 } from './utils/identifiers'
 import type { RevocationRegistryDelta } from './utils/transform'
 import { anonCredsRevocationStatusListFromIndyVdr, indyVdrCreateLatestRevocationDelta } from './utils/transform'
@@ -80,14 +76,13 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     try {
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
 
-      // parse schema id (supports did:indy and legacy)
       const { did, namespaceIdentifier, schemaName, schemaVersion } = parseIndySchemaId(schemaId)
-      const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+      const { pool } = indyVdrPoolService.getPoolForDid(did)
       agentContext.config.logger.debug(`Getting schema '${schemaId}' from ledger '${pool.indyNamespace}'`)
 
-      // even though we support did:indy and legacy identifiers we always need to fetch using the legacy identifier
-      const legacySchemaId = getUnqualifiedSchemaId(namespaceIdentifier, schemaName, schemaVersion)
-      const request = new GetSchemaRequest({ schemaId: legacySchemaId })
+      // The ledger identifies the schema with the indy ledger schema id, not with the did:indy schema id
+      const ledgerSchemaId = getIndyLedgerSchemaId(namespaceIdentifier, schemaName, schemaVersion)
+      const request = new GetSchemaRequest({ schemaId: ledgerSchemaId })
 
       agentContext.config.logger.trace(
         `Submitting get schema request for schema '${schemaId}' to ledger '${pool.indyNamespace}'`
@@ -150,9 +145,6 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     const schema = options.schema
     const { issuerId, name, version, attrNames } = schema
     try {
-      // This will throw an error if trying to register a schema with a legacy indy identifier. We only support did:indy identifiers
-      // for registering, that will allow us to extract the namespace and means all stored records will use did:indy identifiers.
-
       const { namespaceIdentifier, namespace } = parseIndyDid(issuerId)
       const { endorserDid, endorserMode } = options.options
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
@@ -171,11 +163,11 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         writeRequest = new CustomRequest({ customRequest: endorsedTransaction })
       } else {
         agentContext.config.logger.debug(`Create schema tx on ledger '${namespace}' with did '${issuerId}'`, schema)
-        const legacySchemaId = getUnqualifiedSchemaId(namespaceIdentifier, name, version)
+        const ledgerSchemaId = getIndyLedgerSchemaId(namespaceIdentifier, name, version)
 
         const schemaRequest = new SchemaRequest({
           submitterDid: namespaceIdentifier,
-          schema: { id: legacySchemaId, name, ver: '1.0', version, attrNames },
+          schema: { id: ledgerSchemaId, name, ver: '1.0', version, attrNames },
         })
 
         const submitterKey = await verificationPublicJwkForIndyDid(agentContext, issuerId)
@@ -253,17 +245,16 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     try {
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
 
-      // we support did:indy and legacy identifiers
       const { did, namespaceIdentifier, schemaSeqNo, tag } = parseIndyCredentialDefinitionId(credentialDefinitionId)
-      const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+      const { pool } = indyVdrPoolService.getPoolForDid(did)
 
       agentContext.config.logger.debug(
         `Getting credential definition '${credentialDefinitionId}' from ledger '${pool.indyNamespace}'`
       )
 
-      const legacyCredentialDefinitionId = getUnqualifiedCredentialDefinitionId(namespaceIdentifier, schemaSeqNo, tag)
+      const ledgerCredentialDefinitionId = getIndyLedgerCredentialDefinitionId(namespaceIdentifier, schemaSeqNo, tag)
       const request = new GetCredentialDefinitionRequest({
-        credentialDefinitionId: legacyCredentialDefinitionId,
+        credentialDefinitionId: ledgerCredentialDefinitionId,
       })
 
       agentContext.config.logger.trace(
@@ -272,7 +263,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
       const response = await pool.submitRequest(request)
 
       // We need to fetch the schema to determine the schemaId (we only have the seqNo)
-      const schema = await this.fetchIndySchemaWithSeqNo(agentContext, response.result.ref, namespaceIdentifier)
+      const schema = await this.fetchIndySchemaWithSeqNo(agentContext, response.result.ref, did)
 
       if (!schema || !response.result.data) {
         agentContext.config.logger.error(`Error retrieving credential definition '${credentialDefinitionId}'`)
@@ -287,10 +278,12 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         }
       }
 
-      // Format the schema id based on the type of the credential definition id
-      const schemaId = credentialDefinitionId.startsWith('did:indy')
-        ? getDidIndySchemaId(pool.indyNamespace, schema.schema.issuerId, schema.schema.name, schema.schema.version)
-        : schema.schema.schemaId
+      const schemaId = getDidIndySchemaId(
+        pool.indyNamespace,
+        schema.schema.issuerId,
+        schema.schema.name,
+        schema.schema.version
+      )
 
       return {
         credentialDefinitionId,
@@ -331,8 +324,6 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     const { schemaId, issuerId, tag, value } = credentialDefinition
 
     try {
-      // This will throw an error if trying to register a credential definition with a legacy indy identifier. We only support did:indy
-      // identifiers for registering, that will allow us to extract the namespace and means all stored records will use did:indy identifiers.
       const { namespaceIdentifier, namespace } = parseIndyDid(issuerId)
       const { endorserDid, endorserMode } = options.options
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
@@ -390,13 +381,13 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         }
         schemaSeqNo = schemaMetadata.indyLedgerSeqNo
 
-        // FIXME: we need to check if schemaId has same namespace as issuerId and it should not be a legacy identifier
+        // FIXME: we need to check if schemaId has same namespace as issuerId
         // FIXME: in the other methods we also need to add checks. E.g. when creating a revocation
         // status list, you can only create a revocation status list for a credential definition registry that is created
         // under the same namespace and by the same issuer id (you can create a cred def for a schema created by another issuer
         // but you can't create a revocation registry based on a cred def created by another issuer. We need to add these checks
         // to all register methods in this file)
-        const legacyCredentialDefinitionId = getUnqualifiedCredentialDefinitionId(issuerId, schemaSeqNo, tag)
+        const ledgerCredentialDefinitionId = getIndyLedgerCredentialDefinitionId(namespaceIdentifier, schemaSeqNo, tag)
         didIndyCredentialDefinitionId = getDidIndyCredentialDefinitionId(
           namespace,
           namespaceIdentifier,
@@ -408,7 +399,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
           submitterDid: namespaceIdentifier,
           credentialDefinition: {
             ver: '1.0',
-            id: legacyCredentialDefinitionId,
+            id: ledgerCredentialDefinitionId,
             schemaId: schemaSeqNo.toString(),
             type: 'CL',
             tag,
@@ -491,20 +482,20 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
 
       const { did, namespaceIdentifier, credentialDefinitionTag, revocationRegistryTag, schemaSeqNo } =
         parseIndyRevocationRegistryId(revocationRegistryDefinitionId)
-      const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+      const { pool } = indyVdrPoolService.getPoolForDid(did)
 
       agentContext.config.logger.debug(
         `Using ledger '${pool.indyNamespace}' to retrieve revocation registry definition '${revocationRegistryDefinitionId}'`
       )
 
-      const legacyRevocationRegistryId = getUnqualifiedRevocationRegistryDefinitionId(
+      const ledgerRevocationRegistryId = getIndyLedgerRevocationRegistryDefinitionId(
         namespaceIdentifier,
         schemaSeqNo,
         credentialDefinitionTag,
         revocationRegistryTag
       )
       const request = new GetRevocationRegistryDefinitionRequest({
-        revocationRegistryId: legacyRevocationRegistryId,
+        revocationRegistryId: ledgerRevocationRegistryId,
       })
 
       agentContext.config.logger.trace(
@@ -537,14 +528,12 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         }
       )
 
-      const credentialDefinitionId = revocationRegistryDefinitionId.startsWith('did:indy:')
-        ? getDidIndyCredentialDefinitionId(
-            pool.indyNamespace,
-            namespaceIdentifier,
-            schemaSeqNo,
-            credentialDefinitionTag
-          )
-        : getUnqualifiedCredentialDefinitionId(namespaceIdentifier, schemaSeqNo, credentialDefinitionTag)
+      const credentialDefinitionId = getDidIndyCredentialDefinitionId(
+        pool.indyNamespace,
+        namespaceIdentifier,
+        schemaSeqNo,
+        credentialDefinitionTag
+      )
 
       const revocationRegistryDefinition = {
         issuerId: did,
@@ -597,8 +586,6 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     { options, revocationRegistryDefinition }: IndyVdrRegisterRevocationRegistryDefinition
   ): Promise<IndyVdrRegisterRevocationRegistryDefinitionReturn> {
     try {
-      // This will throw an error if trying to register a credential definition with a legacy indy identifier. We only support did:indy
-      // identifiers for registering, that will allow us to extract the namespace and means all stored records will use did:indy identifiers.
       const { namespaceIdentifier, namespace } = parseIndyDid(revocationRegistryDefinition.issuerId)
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
       const pool = indyVdrPoolService.getPoolForNamespace(namespace)
@@ -630,7 +617,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
           revocationRegistryDefinition.tag
         )
       } else {
-        const legacyRevocationRegistryDefinitionId = getUnqualifiedRevocationRegistryDefinitionId(
+        const ledgerRevocationRegistryDefinitionId = getIndyLedgerRevocationRegistryDefinitionId(
           namespaceIdentifier,
           schemaSeqNo,
           credentialDefinitionTag,
@@ -645,7 +632,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
           revocationRegistryDefinition.tag
         )
 
-        const legacyCredentialDefinitionId = getUnqualifiedCredentialDefinitionId(
+        const ledgerCredentialDefinitionId = getIndyLedgerCredentialDefinitionId(
           namespaceIdentifier,
           schemaSeqNo,
           credentialDefinitionTag
@@ -654,9 +641,9 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         const revocationRegistryDefinitionRequest = new RevocationRegistryDefinitionRequest({
           submitterDid: namespaceIdentifier,
           revocationRegistryDefinitionV1: {
-            id: legacyRevocationRegistryDefinitionId,
+            id: ledgerRevocationRegistryDefinitionId,
             ver: '1.0',
-            credDefId: legacyCredentialDefinitionId,
+            credDefId: ledgerCredentialDefinitionId,
             tag: revocationRegistryDefinition.tag,
             revocDefType: revocationRegistryDefinition.revocDefType,
             value: {
@@ -705,7 +692,10 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
       )
 
       return {
-        revocationRegistryDefinitionMetadata: {},
+        revocationRegistryDefinitionMetadata: {
+          issuanceType: 'ISSUANCE_BY_DEFAULT',
+          didIndyNamespace: pool.indyNamespace,
+        },
         revocationRegistryDefinitionState: {
           revocationRegistryDefinition,
           revocationRegistryDefinitionId: didIndyRevocationRegistryDefinitionId,
@@ -744,7 +734,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
 
       const { did } = parseIndyRevocationRegistryId(revocationRegistryDefinitionId)
-      const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+      const { pool } = indyVdrPoolService.getPoolForDid(did)
 
       const revocationDelta = await this.fetchIndyRevocationDelta(
         agentContext,
@@ -766,14 +756,21 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
       const { revocationRegistryDefinition, resolutionMetadata, revocationRegistryDefinitionMetadata } =
         await anoncredsRegistryService.getRevocationRegistryDefinition(agentContext, revocationRegistryDefinitionId)
 
-      if (
-        !revocationRegistryDefinition ||
-        !revocationRegistryDefinitionMetadata.issuanceType ||
-        typeof revocationRegistryDefinitionMetadata.issuanceType !== 'string'
-      ) {
+      // Credo always registers revocation registries with ISSUANCE_BY_DEFAULT. Local records created before the
+      // issuance type was stored in the metadata don't contain it, so we can safely default it for those.
+      const issuanceType =
+        revocationRegistryDefinitionMetadata.issuanceType ??
+        (resolutionMetadata.servedFromRecord ? 'ISSUANCE_BY_DEFAULT' : undefined)
+
+      if (!revocationRegistryDefinition || typeof issuanceType !== 'string') {
         return {
           resolutionMetadata: {
-            error: `error resolving revocation registry definition with id ${revocationRegistryDefinitionId}: ${resolutionMetadata.error} ${resolutionMetadata.message}`,
+            error: 'error',
+            message: `Error resolving revocation registry definition with id ${revocationRegistryDefinitionId}: ${
+              resolutionMetadata.message ??
+              resolutionMetadata.error ??
+              'the definition is missing or has invalid issuance type metadata'
+            }`,
           },
           revocationStatusListMetadata: {
             didIndyNamespace: pool.indyNamespace,
@@ -781,7 +778,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         }
       }
 
-      const isIssuanceByDefault = revocationRegistryDefinitionMetadata.issuanceType === 'ISSUANCE_BY_DEFAULT'
+      const isIssuanceByDefault = issuanceType === 'ISSUANCE_BY_DEFAULT'
 
       return {
         resolutionMetadata: {},
@@ -819,8 +816,6 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     { options, revocationStatusList }: IndyVdrRegisterRevocationStatusList
   ): Promise<IndyVdrRegisterRevocationStatusListReturn> {
     try {
-      // This will throw an error if trying to register a revocation status list with a legacy indy identifier. We only support did:indy
-      // identifiers for registering, that will allow us to extract the namespace and means all stored records will use did:indy identifiers.
       const { endorsedTransaction, endorserDid, endorserMode } = options
       const { namespaceIdentifier, namespace } = parseIndyDid(revocationStatusList.issuerId)
       const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
@@ -842,7 +837,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         namespace: revocationRegistryNamespace,
       } = parseIndyRevocationRegistryId(revocationStatusList.revRegDefId)
 
-      const legacyRevocationRegistryDefinitionId = getUnqualifiedRevocationRegistryDefinitionId(
+      const ledgerRevocationRegistryDefinitionId = getIndyLedgerRevocationRegistryDefinitionId(
         namespaceIdentifier,
         schemaSeqNo,
         credentialDefinitionTag,
@@ -857,7 +852,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
         revocationRegistryTag
       )
 
-      if (revocationRegistryNamespace && revocationRegistryNamespace !== namespace) {
+      if (revocationRegistryNamespace !== namespace) {
         throw new CredoError(
           `Issued id '${revocationStatusList.issuerId}' does not have the same namespace (${namespace}) as the revocation registry definition '${revocationRegistryNamespace}'`
         )
@@ -879,7 +874,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
       } else {
         const previousDelta = await this.fetchIndyRevocationDelta(
           agentContext,
-          legacyRevocationRegistryDefinitionId,
+          revocationStatusList.revRegDefId,
           // Fetch revocation delta for current timestamp
           dateToTimestamp(new Date())
         )
@@ -897,7 +892,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
             value: revocationRegistryDefinitionEntryValue,
           },
           revocationRegistryDefinitionType: 'CL_ACCUM',
-          revocationRegistryDefinitionId: legacyRevocationRegistryDefinitionId,
+          revocationRegistryDefinitionId: ledgerRevocationRegistryDefinitionId,
         })
 
         const submitterKey = await verificationPublicJwkForIndyDid(agentContext, revocationStatusList.issuerId)
@@ -974,7 +969,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
   private async fetchIndySchemaWithSeqNo(agentContext: AgentContext, seqNo: number, did: string) {
     const indyVdrPoolService = agentContext.dependencyManager.resolve(IndyVdrPoolService)
 
-    const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+    const { pool } = indyVdrPoolService.getPoolForDid(did)
 
     agentContext.config.logger.debug(`Getting transaction with seqNo '${seqNo}' from ledger '${pool.indyNamespace}'`)
     // ledgerType 1 is domain ledger
@@ -990,11 +985,9 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
 
     const schema = response.result.data?.txn.data as SchemaType
     const schemaDid = response.result.data?.txn.metadata.from as string
-    const schemaId = getUnqualifiedSchemaId(schemaDid, schema.data.name, schema.data.version)
 
     return {
       schema: {
-        schemaId,
         attr_name: schema.data.attr_names,
         name: schema.data.name,
         version: schema.data.version,
@@ -1014,13 +1007,13 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
 
     const { did, namespaceIdentifier, schemaSeqNo, credentialDefinitionTag, revocationRegistryTag } =
       parseIndyRevocationRegistryId(revocationRegistryDefinitionId)
-    const { pool } = await indyVdrPoolService.getPoolForDid(agentContext, did)
+    const { pool } = indyVdrPoolService.getPoolForDid(did)
 
     agentContext.config.logger.debug(
       `Using ledger '${pool.indyNamespace}' to retrieve revocation registry deltas with revocation registry definition id '${revocationRegistryDefinitionId}' until ${toTs}`
     )
 
-    const legacyRevocationRegistryDefinitionId = getUnqualifiedRevocationRegistryDefinitionId(
+    const ledgerRevocationRegistryDefinitionId = getIndyLedgerRevocationRegistryDefinitionId(
       namespaceIdentifier,
       schemaSeqNo,
       credentialDefinitionTag,
@@ -1030,7 +1023,7 @@ export class IndyVdrAnonCredsRegistry implements AnonCredsRegistry {
     const deltaRequest = new GetRevocationRegistryDeltaRequest({
       toTs,
       submitterDid: namespaceIdentifier,
-      revocationRegistryId: legacyRevocationRegistryDefinitionId,
+      revocationRegistryId: ledgerRevocationRegistryDefinitionId,
     })
 
     agentContext.config.logger.trace(`Submitting get transaction request to ledger '${pool.indyNamespace}'`)

@@ -1,6 +1,6 @@
 import { CredoError } from '../../../error'
 import { JsonTransformer, MessageValidator } from '../../../utils'
-import { ClaimFormat } from '../models'
+import { ClaimFormat } from '../models/ClaimFormat'
 import { W3cV2Presentation } from '../models/presentation/W3cV2Presentation'
 import { decodeSdJwt, type W3cV2SdJwt } from './W3cV2SdJwt'
 
@@ -65,22 +65,25 @@ export class W3cV2SdJwtVerifiablePresentation {
     // Validate the resolved credential according to the data model
     MessageValidator.validateSync(this.resolvedPresentation)
 
-    // Basic JWT validations to ensure compliance to the specification
+    // JWT validations to ensure compliance to the specification
     const sdJwt = this.sdJwt
     const header = sdJwt.header
     const payload = sdJwt.prettyClaims
+
+    if (header.alg === 'none') {
+      throw new CredoError(`The provided W3C VP SD-JWT uses 'alg'='none', which is not allowed.`)
+    }
 
     if ('typ' in header && header.typ !== 'vp+sd-jwt') {
       throw new CredoError(`The provided W3C VP JWT does not have the correct 'typ' header.`)
     }
 
-    if ('cyt' in header && header.cyt !== 'vp') {
-      throw new CredoError(`The provided W3C VP JWT does not have the correct 'cyt' header.`)
+    if ('cty' in header && header.cty !== 'vp') {
+      throw new CredoError(`The provided W3C VP JWT does not have the correct 'cty' header.`)
     }
 
-    const iss = header.iss ?? payload.iss
-    if (iss && this.resolvedPresentation.holderId) {
-      if (this.resolvedPresentation.holderId !== iss) {
+    if (payload.iss && this.resolvedPresentation.holderId) {
+      if (this.resolvedPresentation.holderId !== payload.iss) {
         throw new CredoError(`The provided W3C VP SD-JWT has both 'iss' and 'holder' claims, but they differ.`)
       }
     }

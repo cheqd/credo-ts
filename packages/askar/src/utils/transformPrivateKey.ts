@@ -1,4 +1,4 @@
-import { type AnyUint8Array, CredoError, Kms } from '@credo-ts/core'
+import { CredoError, Kms } from '@credo-ts/core'
 import { Key as AskarKey } from '@openwallet-foundation/askar-shared'
 import { jwkCrvToAskarAlg } from './askarKeyTypes'
 
@@ -18,7 +18,7 @@ import { jwkCrvToAskarAlg } from './askarKeyTypes'
  *     kty: 'EC',
  *     crv: 'P-256',
  *   },
- *   privateKey: TypedArrayEncoder.fromString('00000000000000000000000000000My1')
+ *   privateKey: TypedArrayEncoder.fromUtf8String('00000000000000000000000000000My1')
  * })
  *
  * const { keyId } = await agent.kms.importKey({
@@ -31,21 +31,25 @@ export function transformPrivateKeyToPrivateJwk<Type extends Kms.KmsCreateKeyTyp
   privateKey,
 }: {
   type: Type
-  privateKey: AnyUint8Array
+  privateKey: Uint8Array
 }): { privateJwk: Kms.KmsJwkPrivateFromKmsJwkPublic<Kms.KmsJwkPublicFromCreateType<Type>> } {
   const askarAlgorithm = jwkCrvToAskarAlg[type.crv]
   if (!askarAlgorithm) {
     throw new CredoError(`kty '${type.kty}' with crv '${type.crv}' not supported by Askar`)
   }
 
-  const privateJwk = AskarKey.fromSecretBytes({
+  const key = AskarKey.fromSecretBytes({
     algorithm: askarAlgorithm,
     secretKey: privateKey,
-  }).jwkSecret
+  })
 
-  return {
-    // biome-ignore lint/suspicious/noExplicitAny: no explanation
-    privateJwk: privateJwk as any,
+  try {
+    return {
+      // biome-ignore lint/suspicious/noExplicitAny: no explanation
+      privateJwk: key.jwkSecret as any,
+    }
+  } finally {
+    key.handle.free()
   }
 }
 
@@ -65,7 +69,7 @@ export function transformPrivateKeyToPrivateJwk<Type extends Kms.KmsCreateKeyTyp
  *     kty: 'EC',
  *     crv: 'P-256',
  *   },
- *   seed: TypedArrayEncoder.fromString('00000000000000000000000000000My1')
+ *   seed: TypedArrayEncoder.fromUtf8String('00000000000000000000000000000My1')
  * })
  *
  * const { keyId } = await agent.kms.importKey({
@@ -78,20 +82,24 @@ export function transformSeedToPrivateJwk<Type extends Kms.KmsCreateKeyTypeOkp |
   seed,
 }: {
   type: Type
-  seed: AnyUint8Array
+  seed: Uint8Array
 }): { privateJwk: Kms.KmsJwkPrivateFromKmsJwkPublic<Kms.KmsJwkPublicFromCreateType<Type>> } {
   const askarAlgorithm = jwkCrvToAskarAlg[type.crv]
   if (!askarAlgorithm) {
     throw new CredoError(`kty '${type.kty}' with crv '${type.crv}' not supported by Askar`)
   }
 
-  const privateJwk = AskarKey.fromSeed({
+  const key = AskarKey.fromSeed({
     algorithm: askarAlgorithm,
     seed,
-  }).jwkSecret
+  })
 
-  return {
-    // biome-ignore lint/suspicious/noExplicitAny: no explanation
-    privateJwk: privateJwk as any,
+  try {
+    return {
+      // biome-ignore lint/suspicious/noExplicitAny: no explanation
+      privateJwk: key.jwkSecret as any,
+    }
+  } finally {
+    key.handle.free()
   }
 }

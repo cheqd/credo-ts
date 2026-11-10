@@ -10,7 +10,7 @@ import {
   W3cCredentialService,
   W3cJwtVerifiableCredential,
 } from '@credo-ts/core'
-import nock, { cleanAll, enableNetConnect } from 'nock'
+import nock from 'nock'
 import { InMemoryWalletModule } from '../../../../../tests/InMemoryWalletModule'
 import { transformPrivateKeyToPrivateJwk } from '../../../../askar/src'
 import { agentDependencies } from '../../../../node/src'
@@ -37,7 +37,7 @@ describe('OpenId4VcHolder', () => {
 
     const key = await holder.kms.importKey({
       privateJwk: transformPrivateKeyToPrivateJwk({
-        privateKey: TypedArrayEncoder.fromString('96213c3d7fc8d4d6754c7a0fd969598e'),
+        privateKey: TypedArrayEncoder.fromUtf8String('96213c3d7fc8d4d6754c7a0fd969598e'),
         type: {
           kty: 'OKP',
           crv: 'Ed25519',
@@ -68,8 +68,8 @@ describe('OpenId4VcHolder', () => {
 
   describe('[DRAFT 11]: Pre-authorized flow', () => {
     afterEach(() => {
-      cleanAll()
-      enableNetConnect()
+      nock.cleanAll()
+      nock.enableNetConnect()
     })
 
     it('Should successfully receive credential from MATTR launchpad using the pre-authorized flow using a did:key Ed25519 subject and jwt_vc_json credential', async () => {
@@ -260,6 +260,11 @@ describe('OpenId4VcHolder', () => {
           kid: '#z6Mkh5HNPCCJWZn6WRLjRPttyvYZBskZUdSJfTiZwcUSieqx',
           typ: 'vc+sd-jwt',
         },
+        issuer: {
+          method: 'did',
+          didUrl:
+            'did:key:z6Mkh5HNPCCJWZn6WRLjRPttyvYZBskZUdSJfTiZwcUSieqx#z6Mkh5HNPCCJWZn6WRLjRPttyvYZBskZUdSJfTiZwcUSieqx',
+        },
         holder: {
           jwk: {
             jwk: {
@@ -319,8 +324,8 @@ describe('OpenId4VcHolder', () => {
 
   describe('[DRAFT 11]: Authorization flow', () => {
     afterAll(() => {
-      cleanAll()
-      enableNetConnect()
+      nock.cleanAll()
+      nock.enableNetConnect()
     })
 
     it('Should successfully receive credential from walt.id using the authorized flow using a did:key Ed25519 subject and jwt_vc_json credential', async () => {

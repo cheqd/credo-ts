@@ -4,8 +4,8 @@ import type { JsonObject, SingleOrArray } from '../../../../types'
 import { JsonTransformer } from '../../../../utils'
 import { IsInstanceOrArrayOfInstances, IsUri } from '../../../../utils/validators'
 import { CREDENTIALS_CONTEXT_V1_URL, VERIFIABLE_PRESENTATION_TYPE } from '../../constants'
-import { W3cJsonLdVerifiableCredential } from '../../data-integrity/models/W3cJsonLdVerifiableCredential'
 import { W3cJwtVerifiableCredential } from '../../jwt-vc/W3cJwtVerifiableCredential'
+import { W3cJsonLdVerifiableCredential } from '../../linked-data-proofs/models/W3cJsonLdVerifiableCredential'
 import { IsCredentialJsonLdContext, IsVerifiablePresentationType } from '../../validators'
 import { type W3cVerifiableCredential, W3cVerifiableCredentialTransformer } from '../credential/W3cVerifiableCredential'
 import type { W3cHolderOptions } from './W3cHolder'
@@ -23,7 +23,7 @@ export interface W3cPresentationOptions {
 export class W3cPresentation {
   public constructor(options: W3cPresentationOptions) {
     if (options) {
-      this.id = options.id
+      if (options.id !== undefined) this.id = options.id
       this.context = options.context ?? [CREDENTIALS_CONTEXT_V1_URL]
       this.type = options.type ?? [VERIFIABLE_PRESENTATION_TYPE]
       this.verifiableCredential = options.verifiableCredential

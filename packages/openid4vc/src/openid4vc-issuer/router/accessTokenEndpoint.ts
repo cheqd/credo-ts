@@ -1,7 +1,8 @@
-import { CredoError, joinUriParts, type Query, utils } from '@credo-ts/core'
+import { type AgentContext, CredoError, joinUriParts, type Query, utils } from '@credo-ts/core'
 import type { HttpMethod, Jwk, VerifyAccessTokenRequestReturn } from '@openid4vc/oauth2'
 import {
   authorizationCodeGrantIdentifier,
+  decodeJwt,
   Oauth2ErrorCodes,
   Oauth2ServerErrorResponseError,
   preAuthorizedCodeGrantIdentifier,
@@ -18,7 +19,12 @@ import { OpenId4VcIssuanceSessionState } from '../OpenId4VcIssuanceSessionState'
 import type { OpenId4VcIssuerModuleConfig } from '../OpenId4VcIssuerModuleConfig'
 import { OpenId4VcIssuerService } from '../OpenId4VcIssuerService'
 import { OpenId4VcIssuanceSessionRecord, OpenId4VcIssuanceSessionRepository } from '../repository'
+import { getClientAttestationToVerify } from '../util/walletAttestation'
 import type { OpenId4VcIssuanceRequest } from './requestContext'
+
+// draft 09 §6.1 response header carrying a fresh client attestation challenge. The oid4vc-ts library
+// does not export this constant, so it is defined locally.
+const oauthClientAttestationChallengeHeader = 'OAuth-Client-Attestation-Challenge'
 
 export function configureAccessTokenEndpoint(router: Router, config: OpenId4VcIssuerModuleConfig) {
   router.post(config.accessTokenEndpointPath, handleTokenRequest(config))
@@ -34,6 +40,8 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
       const openId4VcIssuerService = agentContext.dependencyManager.resolve(OpenId4VcIssuerService)
       const issuanceSessionRepository = agentContext.dependencyManager.resolve(OpenId4VcIssuanceSessionRepository)
       const issuerMetadata = await openId4VcIssuerService.getIssuerMetadata(agentContext, issuer)
+      // The first authorization server in the issuer metadata is the internal (Credo) authorization server
+      const internalAuthorizationServerMetadata = issuerMetadata.authorizationServers[0]
       const accessTokenSigningKey = issuer.resolvedAccessTokenPublicJwk
       let oauth2AuthorizationServer = openId4VcIssuerService.getOauth2AuthorizationServer(agentContext)
 
@@ -67,13 +75,26 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
           break
         case refreshTokenGrantIdentifier:
           allowedStates = [
+            OpenId4VcIssuanceSessionState.AccessTokenCreated,
             OpenId4VcIssuanceSessionState.CredentialRequestReceived,
             OpenId4VcIssuanceSessionState.CredentialsPartiallyIssued,
           ]
-          parsedRefreshToken = openId4VcIssuerService.parseRefreshToken(agentContext, grant.refreshToken)
+          // Verify before the session lookup, so an unverified token can't select or change a session
+          try {
+            parsedRefreshToken = openId4VcIssuerService.parseRefreshToken(agentContext, grant.refreshToken)
+            await openId4VcIssuerService.verifyRefreshToken(agentContext, issuer, parsedRefreshToken)
+          } catch (error) {
+            throw new Oauth2ServerErrorResponseError(
+              {
+                error: Oauth2ErrorCodes.InvalidGrant,
+                error_description: 'Invalid refresh token',
+              },
+              { cause: error }
+            )
+          }
           query = {
             preAuthorizedCode: parsedRefreshToken.preAuthorizedCode,
-            authorizationCode: parsedRefreshToken.issuerState,
+            issuerState: parsedRefreshToken.issuerState,
           }
           break
         default:
@@ -83,7 +104,7 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
           })
       }
 
-      const issuanceSession = await issuanceSessionRepository.findSingleByQuery(agentContext, query)
+      let issuanceSession = await issuanceSessionRepository.findSingleByQuery(agentContext, query)
       if (!issuanceSession || !allowedStates.includes(issuanceSession.state)) {
         throw new Oauth2ServerErrorResponseError({
           error: Oauth2ErrorCodes.InvalidGrant,
@@ -96,8 +117,6 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
         utils.addSecondsToDate(issuanceSession.createdAt, config.statefulCredentialOfferExpirationInSeconds)
 
       if (Date.now() > expiresAt.getTime()) {
-        issuanceSession.errorMessage = 'Credential offer has expired'
-        await openId4VcIssuerService.updateState(agentContext, issuanceSession, OpenId4VcIssuanceSessionState.Error)
         throw new Oauth2ServerErrorResponseError({
           // What is the best error here?
           error: Oauth2ErrorCodes.InvalidGrant,
@@ -105,12 +124,17 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
         })
       }
 
-      oauth2AuthorizationServer = openId4VcIssuerService.getOauth2AuthorizationServer(agentContext, {
-        issuanceSessionId: issuanceSession.id,
-      })
+      oauth2AuthorizationServer = openId4VcIssuerService.getOauth2AuthorizationServer(agentContext, { issuanceSession })
       let verificationResult: VerifyAccessTokenRequestReturn
 
+      // First session config, fall back to global config
+      const walletAttestationRequired = issuanceSession.walletAttestation?.required ?? config.walletAttestationsRequired
+
       if (grant.grantType === preAuthorizedCodeGrantIdentifier) {
+        if (issuanceSession.userPin && grant.txCode) {
+          issuanceSession = await verifyTxCode(agentContext, config, issuanceSession, grant.txCode, allowedStates)
+        }
+
         if (!issuanceSession.preAuthorizedCode) {
           throw new Oauth2ServerErrorResponseError(
             {
@@ -129,17 +153,20 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
           expectedPreAuthorizedCode: issuanceSession.preAuthorizedCode,
           grant,
           request: requestLike,
-          authorizationServerMetadata: issuerMetadata.authorizationServers[0],
+          authorizationServerMetadata: internalAuthorizationServerMetadata,
           clientAttestation: {
-            ...clientAttestation,
-            // First session config, fall back to global config
-            required: issuanceSession.walletAttestation?.required ?? config.walletAttestationsRequired,
+            ...getClientAttestationToVerify(config, clientAttestation, walletAttestationRequired),
+            required: walletAttestationRequired,
+            expectedClientId: issuanceSession.clientId,
+            expectedConfirmationJwkThumbprint: issuanceSession.walletAttestation?.confirmationJwkThumbprint,
 
-            // NOTE: we might want to enforce this? Not sure
-            // ensureConfirmationKeyMatchesDpopKey: true
+            // NOTE: `ensureConfirmationKeyMatchesDpopKey` is intentionally not enabled. Per draft §7.2 a request
+            // with an `OAuth-Client-Attestation-PoP` header has its DPoP proof verified per RFC 9449
+            // independently. The library enforces key equality itself for DPoP combined mode (§7.3).
           },
           dpop: {
             ...dpop,
+            allowedSigningAlgs: internalAuthorizationServerMetadata.dpop_signing_alg_values_supported,
             // First session config, fall back to global config
             required: issuanceSession.dpop?.required ?? config.dpopRequired,
           },
@@ -166,24 +193,26 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
           expectedCode: issuanceSession.authorization.code,
           codeExpiresAt: issuanceSession.authorization.codeExpiresAt,
           grant,
-          authorizationServerMetadata: issuerMetadata.authorizationServers[0],
+          authorizationServerMetadata: internalAuthorizationServerMetadata,
           request: requestLike,
           clientAttestation: {
-            ...clientAttestation,
+            ...getClientAttestationToVerify(config, clientAttestation, issuanceSession.walletAttestation?.required),
 
             // Ensure it matches the previously provided client id
-            // FIXME: we don't verify that the attestation is issued by the same party
             expectedClientId: issuanceSession.clientId,
+            expectedConfirmationJwkThumbprint: issuanceSession.walletAttestation?.confirmationJwkThumbprint,
 
             // NOTE: we don't look at the global config here. As we already checked and
             // set required to true previously if client attestations were provided or required.
             required: issuanceSession.walletAttestation?.required,
 
-            // NOTE: we might want to enforce this? Not sure
-            // ensureConfirmationKeyMatchesDpopKey: true
+            // NOTE: `ensureConfirmationKeyMatchesDpopKey` is intentionally not enabled. Per draft §7.2 a request
+            // with an `OAuth-Client-Attestation-PoP` header has its DPoP proof verified per RFC 9449
+            // independently. The library enforces key equality itself for DPoP combined mode (§7.3).
           },
           dpop: {
             ...dpop,
+            allowedSigningAlgs: internalAuthorizationServerMetadata.dpop_signing_alg_values_supported,
             // NOTE: we don't look at the global config here. As we already checked and
             // set required to true previously if client attestations were provided or required.
             required: issuanceSession.dpop?.required,
@@ -191,13 +220,14 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
             // Ensure it matches previously provided jwk thumbprint
             expectedJwkThumbprint: issuanceSession.dpop?.dpopJkt,
           },
-          pkce: issuanceSession.pkce
-            ? {
-                codeChallenge: issuanceSession.pkce.codeChallenge,
-                codeChallengeMethod: issuanceSession.pkce.codeChallengeMethod,
-                codeVerifier: pkceCodeVerifier,
-              }
-            : undefined,
+          pkce:
+            issuanceSession.pkce?.codeChallenge && issuanceSession.pkce.codeChallengeMethod
+              ? {
+                  codeChallenge: issuanceSession.pkce.codeChallenge,
+                  codeChallengeMethod: issuanceSession.pkce.codeChallengeMethod,
+                  codeVerifier: pkceCodeVerifier,
+                }
+              : undefined,
         })
       } else if (grant.grantType === refreshTokenGrantIdentifier) {
         if (!parsedRefreshToken) {
@@ -206,35 +236,93 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
 
         verificationResult = await oauth2AuthorizationServer.verifyRefreshTokenAccessTokenRequest({
           accessTokenRequest,
-          // Refresh token validity is already checked before
+          // The refresh token is verified before the session lookup
           expectedRefreshToken: grant.refreshToken,
           grant,
           request: requestLike,
-          authorizationServerMetadata: issuerMetadata.authorizationServers[0],
+          authorizationServerMetadata: internalAuthorizationServerMetadata,
           clientAttestation: {
-            ...clientAttestation,
-            // First session config, fall back to global config
-            required: issuanceSession.walletAttestation?.required ?? config.walletAttestationsRequired,
+            ...getClientAttestationToVerify(config, clientAttestation, walletAttestationRequired),
+            required: walletAttestationRequired,
+            expectedClientId: issuanceSession.clientId,
+            expectedConfirmationJwkThumbprint: issuanceSession.walletAttestation?.confirmationJwkThumbprint,
 
-            // NOTE: we might want to enforce this? Not sure
-            // ensureConfirmationKeyMatchesDpopKey: true
+            // NOTE: `ensureConfirmationKeyMatchesDpopKey` is intentionally not enabled. Per draft §7.2 a request
+            // with an `OAuth-Client-Attestation-PoP` header has its DPoP proof verified per RFC 9449
+            // independently. The library enforces key equality itself for DPoP combined mode (§7.3).
           },
           dpop: {
             ...dpop,
-            // First session config, fall back to global config
-            required: issuanceSession.dpop?.required ?? config.dpopRequired,
+            allowedSigningAlgs: internalAuthorizationServerMetadata.dpop_signing_alg_values_supported,
+            // A DPoP-bound refresh token can only be used with a proof for the same key (RFC 9449 §5)
+            required: parsedRefreshToken.dpop !== undefined || (issuanceSession.dpop?.required ?? config.dpopRequired),
+            expectedJwkThumbprint: parsedRefreshToken.dpop?.jwkThumbprint,
           },
           refreshTokenExpiresAt: parsedRefreshToken?.expiresAt,
-        })
-
-        await openId4VcIssuerService.verifyRefreshToken(agentContext, issuer, parsedRefreshToken, {
-          dpop: verificationResult.dpop,
         })
       } else {
         throw new Oauth2ServerErrorResponseError({
           error: Oauth2ErrorCodes.UnsupportedGrantType,
           error_description: 'Unsupported grant type',
         })
+      }
+
+      // Client Attestation PoP challenge (draft 09). A provided challenge is always validated; the reactive
+      // `use_attestation_challenge` flow (mint a fresh challenge, return it in the
+      // `OAuth-Client-Attestation-Challenge` header, client retries) is only used when the challenge is
+      // required. A provided-but-invalid challenge is rejected even when not required.
+      if (verificationResult.clientAttestation) {
+        // The method is discriminated by the presence of the client attestation pop jwt (draft 09 §7.3):
+        // the standard method has a pop jwt (challenge in its `challenge` claim); the DPoP-bound method
+        // (`attest_jwt_client_auth_dpop`) has no pop jwt and carries the challenge in the `nonce` claim of
+        // the single DPoP proof. A standard-method pop without a challenge stays undefined here (it must
+        // not read a standalone DPoP nonce).
+        const { clientAttestationPop } = verificationResult.clientAttestation
+        let popChallenge: string | undefined
+        if (clientAttestationPop) {
+          popChallenge = clientAttestationPop.payload.challenge
+        } else if (verificationResult.dpop) {
+          const dpopJwt = requestLike.headers.get('DPoP')
+          const dpopNonce = dpopJwt ? decodeJwt({ jwt: dpopJwt }).payload.nonce : undefined
+          popChallenge = typeof dpopNonce === 'string' ? dpopNonce : undefined
+        }
+
+        const isValid = await openId4VcIssuerService.isClientAttestationPopChallengeValid(
+          agentContext,
+          issuer,
+          popChallenge
+        )
+
+        if (!isValid) {
+          if (config.clientAttestationPopChallengeRequired) {
+            const { challenge } = await openId4VcIssuerService.createClientAttestationChallenge(agentContext, issuer)
+            response.set(oauthClientAttestationChallengeHeader, challenge)
+            throw new Oauth2ServerErrorResponseError({
+              error: Oauth2ErrorCodes.UseAttestationChallenge,
+              error_description: 'A fresh client attestation challenge is required in the client attestation pop jwt.',
+            })
+          }
+
+          // Not required: a missing challenge is fine, but a provided-but-invalid challenge is rejected.
+          if (popChallenge !== undefined) {
+            throw new Oauth2ServerErrorResponseError({
+              error: Oauth2ErrorCodes.InvalidClient,
+              error_description: `Invalid 'challenge' claim in client attestation pop jwt.`,
+            })
+          }
+        }
+
+        // Bind the wallet attestation to the session if this is the first request of the session with a wallet
+        // attestation. This is the case for the pre-authorized code flow, and for a session that did not use a wallet
+        // attestation before. Once bound, the client id and key never change: they are verified above to match.
+        if (!issuanceSession.walletAttestation?.confirmationJwkThumbprint) {
+          issuanceSession.walletAttestation = {
+            // If client attestation is provided, it's required from now on.
+            required: true,
+            confirmationJwkThumbprint: verificationResult.clientAttestation.clientAttestation.confirmationJwkThumbprint,
+          }
+          issuanceSession.clientId = verificationResult.clientAttestation.clientAttestation.payload.sub
+        }
       }
 
       // Do not update the session state if the grant type is refresh token. This
@@ -261,9 +349,11 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
           }
         : undefined
 
-      // Generate a refresh token if they're enabled in the config and the grant type is not refresh token
+      // Generate a refresh token if they're enabled in the config and the grant type is not refresh token. Only
+      // DPoP-bound refresh tokens are issued, as a wallet is a public client (RFC 9700 §2.2.2)
       let refreshToken: string | undefined
-      if (issuanceSession.generateRefreshTokens && grant.grantType !== refreshTokenGrantIdentifier) {
+      const generateRefreshTokens = issuanceSession.generateRefreshTokens ?? config.generateRefreshTokens
+      if (generateRefreshTokens && grant.grantType !== refreshTokenGrantIdentifier && tokenDpop) {
         refreshToken = await openId4VcIssuerService.createRefreshToken(agentContext, issuer, {
           preAuthorizedCode: grant.grantType === preAuthorizedCodeGrantIdentifier ? grant.preAuthorizedCode : undefined,
           issuerState: issuanceSession.authorization?.issuerState,
@@ -307,14 +397,16 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
         subject,
       }
 
-      await openId4VcIssuerService.updateState(
-        agentContext,
-        issuanceSession,
-        // Retain the current session state when refreshing the access token.
-        grant.grantType === refreshTokenGrantIdentifier
-          ? issuanceSession.state
-          : OpenId4VcIssuanceSessionState.AccessTokenCreated
-      )
+      // A refresh keeps the session state, so it doesn't emit a state changed event
+      if (grant.grantType === refreshTokenGrantIdentifier) {
+        await issuanceSessionRepository.update(agentContext, issuanceSession)
+      } else {
+        await openId4VcIssuerService.updateState(
+          agentContext,
+          issuanceSession,
+          OpenId4VcIssuanceSessionState.AccessTokenCreated
+        )
+      }
 
       return sendJsonResponse(response, next, accessTokenResponse)
     } catch (error) {
@@ -325,4 +417,58 @@ export function handleTokenRequest(config: OpenId4VcIssuerModuleConfig) {
       return sendUnknownServerErrorResponse(response, next, agentContext.config.logger, error)
     }
   }
+}
+
+/**
+ * Verifies the `tx_code` under a record lock and counts invalid values, so concurrent requests can't
+ * exceed `txCodeMaxAttempts`. Returns the issuance session as read under the lock.
+ */
+async function verifyTxCode(
+  agentContext: AgentContext,
+  config: OpenId4VcIssuerModuleConfig,
+  issuanceSession: OpenId4VcIssuanceSessionRecord,
+  txCode: string,
+  allowedStates: OpenId4VcIssuanceSessionState[]
+) {
+  const issuanceSessionRepository = agentContext.resolve(OpenId4VcIssuanceSessionRepository)
+
+  let previousState = issuanceSession.state
+  const lockedIssuanceSession = await issuanceSessionRepository.updateByIdWithLock(
+    agentContext,
+    issuanceSession.id,
+    async (record) => {
+      previousState = record.state
+      if (!allowedStates.includes(record.state) || record.userPin === txCode) return record
+
+      record.failedTxCodeAttempts = (record.failedTxCodeAttempts ?? 0) + 1
+      if (record.failedTxCodeAttempts >= config.txCodeMaxAttempts) {
+        record.state = OpenId4VcIssuanceSessionState.Error
+        record.errorMessage = 'Maximum number of tx_code attempts reached'
+      }
+      return record
+    }
+  )
+
+  if (!allowedStates.includes(previousState)) {
+    throw new Oauth2ServerErrorResponseError({
+      error: Oauth2ErrorCodes.InvalidGrant,
+      error_description: 'Invalid authorization code',
+    })
+  }
+
+  if (lockedIssuanceSession.userPin === txCode) return lockedIssuanceSession
+
+  const maxAttemptsReached = lockedIssuanceSession.state === OpenId4VcIssuanceSessionState.Error
+  if (maxAttemptsReached) {
+    agentContext
+      .resolve(OpenId4VcIssuerService)
+      .emitStateChangedEvent(agentContext, lockedIssuanceSession, previousState)
+  }
+
+  throw new Oauth2ServerErrorResponseError({
+    error: Oauth2ErrorCodes.InvalidGrant,
+    error_description: maxAttemptsReached
+      ? `Invalid 'tx_code' provided. The maximum number of attempts has been reached`
+      : `Invalid 'tx_code' provided`,
+  })
 }

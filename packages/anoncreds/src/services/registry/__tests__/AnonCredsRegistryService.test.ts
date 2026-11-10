@@ -1,5 +1,6 @@
+import { CacheModuleConfig, InMemoryLruCache } from '@credo-ts/core'
 import { getAgentContext } from '../../../../../core/tests/helpers'
-import { anoncreds } from '../../../../tests/helpers'
+import { NativeAnoncreds } from '../../../../tests/helpers'
 import { AnonCredsModuleConfig } from '../../../AnonCredsModuleConfig'
 import { AnonCredsError } from '../../../error'
 import type { AnonCredsRegistry } from '../AnonCredsRegistry'
@@ -19,7 +20,7 @@ const agentContext = getAgentContext({
       AnonCredsModuleConfig,
       new AnonCredsModuleConfig({
         registries: [registryOne, registryTwo],
-        anoncreds,
+        anoncreds: NativeAnoncreds,
       }),
     ],
   ],
@@ -35,5 +36,52 @@ describe('AnonCredsRegistryService', () => {
 
   test('throws AnonCredsError if no registry is found for the given identifier', async () => {
     expect(() => anonCredsRegistryService.getRegistryForIdentifier(agentContext, 'c')).toThrow(AnonCredsError)
+  })
+
+  describe('caching', () => {
+    const schemaReturn = {
+      schema: { attrNames: ['name'], issuerId: 'did:indy:pool:issuer', name: 'schema', version: '1.0' },
+      schemaId: 'cached-schema-id',
+      resolutionMetadata: {},
+      schemaMetadata: {},
+    }
+
+    const getContextsSharingCache = (registry: AnonCredsRegistry) => {
+      const anonCredsModuleConfig = new AnonCredsModuleConfig({ registries: [registry], anoncreds: NativeAnoncreds })
+      const cacheModuleConfig = new CacheModuleConfig({ cache: new InMemoryLruCache({ limit: 10 }) })
+
+      return {
+        contextOne: getAgentContext({
+          contextCorrelationId: 'contextOne',
+          registerInstances: [
+            [AnonCredsModuleConfig, anonCredsModuleConfig],
+            [CacheModuleConfig, cacheModuleConfig],
+          ],
+        }),
+        contextTwo: getAgentContext({
+          contextCorrelationId: 'contextTwo',
+          registerInstances: [
+            [AnonCredsModuleConfig, anonCredsModuleConfig],
+            [CacheModuleConfig, cacheModuleConfig],
+          ],
+        }),
+      }
+    }
+
+    test('shares resolved objects across agent contexts', async () => {
+      const registry = {
+        supportedIdentifier: /cached/,
+        allowsCaching: true,
+        getSchema: vi.fn().mockResolvedValue(schemaReturn),
+      } as unknown as AnonCredsRegistry
+
+      const { contextOne, contextTwo } = getContextsSharingCache(registry)
+
+      await anonCredsRegistryService.getSchema(contextOne, 'cached-schema-id')
+      const result = await anonCredsRegistryService.getSchema(contextTwo, 'cached-schema-id')
+
+      expect(result.resolutionMetadata.servedFromCache).toBe(true)
+      expect(registry.getSchema).toHaveBeenCalledTimes(1)
+    })
   })
 })

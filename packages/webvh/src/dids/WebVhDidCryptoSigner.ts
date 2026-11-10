@@ -1,4 +1,4 @@
-import { type AgentContext, Buffer, Kms } from '@credo-ts/core'
+import { type AgentContext, Kms } from '@credo-ts/core'
 import {
   MultibaseEncoding,
   multibaseEncode,
@@ -30,11 +30,11 @@ export class WebVhDidCryptoSigner implements Signer {
   }
 
   /**
-   * Gets the verification method identifier in DID:key format.
-   * @returns The DID:key identifier as a string.
+   * Gets the verification method identifier as a did:key URL.
+   * @returns The verification method URL as a string.
    */
   getVerificationMethodId(): string {
-    return `did:key:${this.publicKeyMultibase}`
+    return `did:key:${this.publicKeyMultibase}#${this.publicKeyMultibase}`
   }
 
   /**
@@ -51,7 +51,7 @@ export class WebVhDidCryptoSigner implements Signer {
       const { signature } = await kms.sign({
         keyId: this.keyId,
         algorithm: 'EdDSA',
-        data: Buffer.from(data),
+        data,
       })
       return {
         proofValue: multibaseEncode(signature, MultibaseEncoding.BASE58_BTC),

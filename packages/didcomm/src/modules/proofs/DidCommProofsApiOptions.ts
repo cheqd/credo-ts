@@ -8,7 +8,7 @@ import type {
 } from './protocol/DidCommProofProtocolOptions'
 
 // re-export GetFormatDataReturn type from protocol, as it is also used in the api
-export type { GetProofFormatDataReturn, DeleteProofOptions }
+export type { DeleteProofOptions, GetProofFormatDataReturn }
 
 export type FindProofProposalMessageReturn<PPs extends DidCommProofProtocol[]> = ReturnType<
   PPs[number]['findProposalMessage']
@@ -89,6 +89,13 @@ export interface CreateProofRequestOptions<PPs extends DidCommProofProtocol[] = 
 
   /** @default true */
   willConfirm?: boolean
+
+  /**
+   * Absolute time after which the request should be considered expired. Set as the `~timing.expires_time`
+   * decorator (RFC 0032) on the request message, so the holder can stop offering to respond once it has passed.
+   * The decorator is advisory: Credo does not enforce it when receiving a request.
+   */
+  expiresTime?: Date
 }
 
 /**

@@ -1,4 +1,3 @@
-import { didIndyRegex } from '@credo-ts/anoncreds'
 import {
   Agent,
   DidCommV1Service,
@@ -15,7 +14,7 @@ import { convertPublicKeyToX25519 } from '@stablelib/ed25519'
 import { transformPrivateKeyToPrivateJwk } from '../../askar/src'
 
 import { getAgentOptions, importExistingIndyDidFromPrivateKey, retryUntilResult } from '../../core/tests/helpers'
-import { IndyVdrModule, IndyVdrSovDidResolver } from '../src'
+import { didIndyRegex, IndyVdrModule } from '../src'
 import { indyDidFromNamespaceAndInitialKey } from '../src/dids/didIndyUtil'
 import type { IndyVdrDidCreateOptions, IndyVdrDidCreateResult } from '../src/dids/IndyVdrIndyDidRegistrar'
 import { IndyVdrIndyDidRegistrar } from '../src/dids/IndyVdrIndyDidRegistrar'
@@ -34,7 +33,7 @@ const endorser = new Agent(
       }),
       dids: new DidsModule({
         registrars: [new IndyVdrIndyDidRegistrar()],
-        resolvers: [new IndyVdrIndyDidResolver(), new IndyVdrSovDidResolver()],
+        resolvers: [new IndyVdrIndyDidResolver()],
       }),
     }
   )
@@ -51,7 +50,7 @@ const agent = new Agent(
       }),
       dids: new DidsModule({
         registrars: [new IndyVdrIndyDidRegistrar()],
-        resolvers: [new IndyVdrIndyDidResolver(), new IndyVdrSovDidResolver()],
+        resolvers: [new IndyVdrIndyDidResolver()],
       }),
     }
   )
@@ -64,7 +63,7 @@ describe('Indy VDR Indy Did Registrar', () => {
     await endorser.initialize()
     const unqualifiedSubmitterDid = await importExistingIndyDidFromPrivateKey(
       endorser,
-      TypedArrayEncoder.fromString('00000000000000000000000Endorser9')
+      TypedArrayEncoder.fromUtf8String('00000000000000000000000Endorser9')
     )
     endorserDid = `did:indy:pool:localtest:${unqualifiedSubmitterDid}`
 
@@ -157,7 +156,7 @@ describe('Indy VDR Indy Did Registrar', () => {
   })
 
   test('can register an endorsed did:indy without services - did and verkey specified', async () => {
-    const privateKey = TypedArrayEncoder.fromString(
+    const privateKey = TypedArrayEncoder.fromUtf8String(
       Array(32 + 1)
         .join(`${Math.random().toString(36)}00000000000000000`.slice(2, 18))
         .slice(0, 32)
@@ -259,7 +258,7 @@ describe('Indy VDR Indy Did Registrar', () => {
   })
 
   test('can register a did:indy without services - did and verkey specified', async () => {
-    const privateKey = TypedArrayEncoder.fromString(
+    const privateKey = TypedArrayEncoder.fromUtf8String(
       Array(32 + 1)
         .join(`${Math.random().toString(36)}00000000000000000`.slice(2, 18))
         .slice(0, 32)
@@ -342,7 +341,7 @@ describe('Indy VDR Indy Did Registrar', () => {
   test('can register a did:indy with services - did and verkey specified - using attrib endpoint', async () => {
     // Generate a private key and the indy did. This allows us to create a new did every time
     // but still check if the created output document is as expected.
-    const privateKey = TypedArrayEncoder.fromString(
+    const privateKey = TypedArrayEncoder.fromUtf8String(
       Array(32 + 1)
         .join(`${Math.random().toString(36)}00000000000000000`.slice(2, 18))
         .slice(0, 32)
@@ -468,7 +467,7 @@ describe('Indy VDR Indy Did Registrar', () => {
   test('can register an endorsed did:indy with services - did and verkey specified - using attrib endpoint', async () => {
     // Generate a private key and the indy did. This allows us to create a new did every time
     // but still check if the created output document is as expected.
-    const privateKey = TypedArrayEncoder.fromString(
+    const privateKey = TypedArrayEncoder.fromUtf8String(
       Array(32 + 1)
         .join(`${Math.random().toString(36)}00000000000000000`.slice(2, 18))
         .slice(0, 32)

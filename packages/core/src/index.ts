@@ -5,10 +5,18 @@ export * from './agent'
 export { Agent } from './agent/Agent'
 export { AgentConfig } from './agent/AgentConfig'
 export type { AgentDependencies } from './agent/AgentDependencies'
-export type { AgentApi, DefaultAgentModules, EmptyModuleMap, ModulesMap } from './agent/AgentModules'
+export type {
+  AgentApi,
+  AgentModulesInput,
+  DefaultAgentModules,
+  EmptyModuleMap,
+  ModulesMap,
+} from './agent/AgentModules'
 export { BaseAgent } from './agent/BaseAgent'
 export { EventEmitter } from './agent/EventEmitter'
 export * from './agent/Events'
+export { TrustedIssuerContext } from './agent/TrustedIssuerContext'
+export * from './agent/TrustedIssuersForVerification'
 export { InjectionSymbols } from './constants'
 export * from './crypto'
 export * from './error'
@@ -26,20 +34,30 @@ export {
   verkeyToPublicJwk,
 } from './modules/dids/helpers'
 export { didDocumentJsonToNumAlgo1Did } from './modules/dids/methods/peer/peerDidNumAlgo1'
-export { didDocumentToNumAlgo2Did } from './modules/dids/methods/peer/peerDidNumAlgo2'
-export { didDocumentToNumAlgo4Did } from './modules/dids/methods/peer/peerDidNumAlgo4'
+export {
+  didDocumentToNumAlgo2Did,
+  didToNumAlgo2DidDocument,
+} from './modules/dids/methods/peer/peerDidNumAlgo2'
+export {
+  areEquivalentDidPeer4Forms,
+  didDocumentToNumAlgo4Did,
+  didToNumAlgo4DidDocument,
+  getAlternativeDidsForNumAlgo4Did,
+  getDidPeer4ShortFormForEquivalence,
+  isShortFormDidPeer4,
+} from './modules/dids/methods/peer/peerDidNumAlgo4'
 export { DidRecordMetadataKeys } from './modules/dids/repository/didRecordMetadataTypes'
 export * from './modules/dif-presentation-exchange'
 export * from './modules/generic-records'
-
 /**
  * @deprecated import from `@credo-ts/core/kms` instead
  */
 export * as Kms from './modules/kms'
-
 export * from './modules/mdoc'
 export * from './modules/sd-jwt-vc'
+export * from './modules/token-status-list'
 export * from './modules/vc'
+export * from './modules/w3c-di'
 export * from './modules/x509'
 export * from './plugins'
 export * from './storage/BaseRecord'
@@ -49,6 +67,11 @@ export * from './storage/migration'
 export type { UpdateConfig, V0_1ToV0_2UpdateConfig } from './storage/migration/updates'
 export { Repository } from './storage/Repository'
 export * from './storage/RepositoryEvents'
+export {
+  type CreateRecordEncodingSchemaOptions,
+  createRecordEncodingSchema,
+  getRecordPropertyNames,
+} from './storage/recordEncodingSchema'
 export type {
   BaseRecordConstructor,
   Query,
@@ -58,7 +81,6 @@ export type {
 } from './storage/StorageService'
 export { decodeCursor, encodeCursor, recordToCursor } from './storage/StorageService'
 export type {
-  AnyUint8Array,
   CanBePromise,
   InitConfig,
   JsonArray,
@@ -68,18 +90,17 @@ export type {
   Optional,
   ResolvedDidCommService,
   SingleOrArray,
-  Uint8ArrayBuffer,
   XOR,
 } from './types'
 export { isJsonObject, isNonEmptyArray, mapNonEmptyArray } from './types'
 export {
   asArray,
   type BaseName,
-  Buffer,
   DateTransformer,
   deepEquality,
   equalsIgnoreOrder,
   equalsWithOrder,
+  getEncodingSchema,
   IntegrityVerifier,
   IsStringOrInstance,
   IsStringOrInstanceOrArrayOfInstances,
@@ -92,8 +113,16 @@ export {
   MultiBaseEncoder,
   MultiHashEncoder,
   TypedArrayEncoder,
+  type ZodEncodedClass,
+  zDecodeWithErrorHandling,
+  zEncodeWithErrorHandling,
+  zIsoDate,
+  zJsonTransformerClass,
+  zMapFromObject,
+  zNonEmptyArray,
+  zTypedObject,
+  zWithUpgrade,
 } from './utils'
-export { base64ToBase64URL } from './utils/base64'
 export type {
   CredentialMultiInstanceUseUpdateMode,
   UseInstanceFromCredentialRecordOptions,
@@ -102,6 +131,7 @@ export type {
 export { canUseInstanceFromCredentialRecord, useInstanceFromCredentialRecord } from './utils/credentialUse'
 export { CredentialMultiInstanceState, CredentialMultiInstanceUseMode } from './utils/credentialUseTypes'
 export { getDomainFromUrl } from './utils/domain'
+export type { FetchLimits } from './utils/fetch'
 export type { Constructable, Constructor, UnionToIntersection } from './utils/mixins'
 export { getDirFromFilePath, joinUriParts } from './utils/path'
 export type { VersionString } from './utils/version'
@@ -109,14 +139,16 @@ export type { VersionString } from './utils/version'
 import { indyDidFromPublicKeyBase58 } from './utils/did'
 import { areObjectsEqual } from './utils/objectEquality'
 import timestamp, { addSecondsToDate, dateToSeconds, nowInSeconds } from './utils/timestamp'
-import { getProtocolScheme } from './utils/uri'
-import { isValidUuid, uuid } from './utils/uuid'
+import { getProtocolScheme, isAllowedHttpUrl } from './utils/uri'
+import { isValidUuid, uuid, uuidFromName } from './utils/uuid'
 
 const utils = {
   areObjectsEqual,
   uuid,
+  uuidFromName,
   isValidUuid,
   getProtocolScheme,
+  isAllowedHttpUrl,
   timestamp,
   indyDidFromPublicKeyBase58,
   nowInSeconds,

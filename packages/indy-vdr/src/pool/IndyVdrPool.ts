@@ -1,4 +1,3 @@
-import { parseIndyDid } from '@credo-ts/anoncreds'
 import { AgentContext, Kms, TypedArrayEncoder } from '@credo-ts/core'
 import type { IndyVdrRequest, IndyVdrPool as indyVdrPool, RequestResponseType } from '@hyperledger/indy-vdr-shared'
 import {
@@ -7,7 +6,7 @@ import {
   indyVdr,
   PoolCreate,
 } from '@hyperledger/indy-vdr-shared'
-
+import { parseIndyDid } from '../dids/didIndyUtil'
 import { IndyVdrError } from '../error'
 
 export interface TransactionAuthorAgreement {
@@ -116,7 +115,7 @@ export class IndyVdrPool {
     }
 
     const { signature } = await kms.sign({
-      data: TypedArrayEncoder.fromString(request.signatureInput),
+      data: TypedArrayEncoder.fromUtf8String(request.signatureInput),
       algorithm: 'EdDSA',
       keyId: signingKey.keyId,
     })

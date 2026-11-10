@@ -13,6 +13,7 @@ import type {
   OpenId4VciAccessTokenResponse,
   OpenId4VciCredentialConfigurationSupportedWithFormats,
   OpenId4VciCredentialConfigurationsSupportedWithFormats,
+  OpenId4VciKeyAttestationLevel,
   OpenId4VciMetadata,
 } from '../shared'
 import { OpenId4VciCredentialFormatProfile } from '../shared/models/OpenId4VciCredentialFormatProfile'
@@ -35,6 +36,15 @@ export const openId4VciSupportedCredentialFormats: OpenId4VciSupportedCredential
   OpenId4VciCredentialFormatProfile.LdpVc,
   OpenId4VciCredentialFormatProfile.MsoMdoc,
 ]
+
+export type OpenId4VciSignedMetadataPolicy = 'required' | 'preferred' | 'disallowed'
+
+export interface OpenId4VciResolveIssuerMetadataOptions {
+  /**
+   * Overrides the `signedMetadata` holder module config for this call.
+   */
+  signedMetadata?: OpenId4VciSignedMetadataPolicy
+}
 
 export interface OpenId4VciDpopRequestOptions {
   jwk: Kms.PublicJwk
@@ -108,6 +118,12 @@ export type OpenId4VciResolvedAuthorizationRequest =
       authSession: string
 
       /**
+       * The pkce code verifier, to be provided in the token request when exchanging
+       * the authorization code obtained using the presentation.
+       */
+      codeVerifier?: string
+
+      /**
        * DPoP request options if DPoP was used for the authorization challenge request
        */
       dpop?: OpenId4VciDpopRequestOptions
@@ -118,7 +134,7 @@ export type OpenId4VciResolvedAuthorizationRequest =
       codeVerifier?: string
 
       /**
-       * DPoP request options if DPoP was used for the pushed authorization reuqest
+       * DPoP request options if DPoP was used for the pushed authorization request
        */
       dpop?: OpenId4VciDpopRequestOptions
     }
@@ -349,7 +365,7 @@ export interface OpenId4VciAuthCodeFlowOptions {
    * The wallet attestation to send to the issuer. This will only be used
    * if client attestations and PAR are supported by the issuer.
    *
-   * A Proof of Possesion will be created based on the wallet attestation,
+   * A Proof of Possession will be created based on the wallet attestation,
    * so the key bound to the wallet attestation must be in the wallet.
    */
   walletAttestationJwt?: string
@@ -363,7 +379,7 @@ export interface OpenId4VciCredentialBindingOptions {
 
   /**
    * The OpenID4VCI metadata, consisting of the draft version used,
-   * the issuer metadatan and the authorization server metadata
+   * the issuer metadata and the authorization server metadata
    */
   metadata: OpenId4VciMetadata
 
@@ -384,9 +400,9 @@ export interface OpenId4VciCredentialBindingOptions {
    * by credo. Currently `jwt` and `attestation` are supported.
    *
    * Each proof type will list the supported algorithms, key types
-   * and whether key attesations are required
+   * and whether key attestations are required
    */
-  proofTypes: OpenId4VciProofOfPressionProofTypes
+  proofTypes: OpenId4VciProofOfPossessionProofTypes
 
   /**
    * The id of the credential configuration that will be requested from the issuer.
@@ -457,7 +473,12 @@ export type OpenId4VciCredentialBindingResolver = (
   options: OpenId4VciCredentialBindingOptions
 ) => Promise<OpenId4VcCredentialHolderBinding> | OpenId4VcCredentialHolderBinding
 
-export type OpenId4VciProofOfPressionProofTypes = Record<
+/**
+ * @deprecated use {@link OpenId4VciProofOfPossessionProofTypes} instead.
+ */
+export type OpenId4VciProofOfPressionProofTypes = OpenId4VciProofOfPossessionProofTypes
+
+export type OpenId4VciProofOfPossessionProofTypes = Record<
   'jwt' | 'attestation',
   | {
       /**
@@ -483,8 +504,8 @@ export type OpenId4VciProofOfPressionProofTypes = Record<
        *  by the `keyStorage` and `userAuthentication` values.
        */
       keyAttestationsRequired?: {
-        keyStorage?: string[]
-        userAuthentication?: string[]
+        keyStorage?: (OpenId4VciKeyAttestationLevel | (string & {}))[]
+        userAuthentication?: (OpenId4VciKeyAttestationLevel | (string & {}))[]
       }
     }
   | undefined
@@ -494,7 +515,7 @@ export type OpenId4VciProofOfPressionProofTypes = Record<
  * @internal
  */
 export interface OpenId4VciProofOfPossessionRequirements {
-  proofTypes: OpenId4VciProofOfPressionProofTypes
+  proofTypes: OpenId4VciProofOfPossessionProofTypes
   supportedDidMethods?: string[]
   supportsAllDidMethods: boolean
   supportsJwk: boolean

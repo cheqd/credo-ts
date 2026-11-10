@@ -6,11 +6,12 @@ import {
   CredoError,
   DidResolverService,
   DidsModuleConfig,
+  defaultDocumentLoader,
   EventEmitter,
   InjectionSymbols,
-  SignatureSuiteToken,
+  JsonLdModuleConfig,
+  SignatureSuiteRegistry,
   W3cCredentialRepository,
-  W3cCredentialsModuleConfig,
 } from '@credo-ts/core'
 import {
   DidCommCredentialExchangeRecord,
@@ -18,24 +19,29 @@ import {
   DidCommCredentialRole,
   DidCommCredentialState,
 } from '@credo-ts/didcomm'
+import {
+  isDidIndyCredentialDefinitionId,
+  isDidIndyRevocationRegistryId,
+  parseIndyCredentialDefinitionId,
+  parseIndyRevocationRegistryId,
+} from '@credo-ts/indy-vdr/anoncreds'
 import { Subject } from 'rxjs'
-
 import { InMemoryStorageService } from '../../../../../../tests/InMemoryStorageService'
 import type { MockedClassConstructor } from '../../../../../../tests/types'
 import { agentDependencies, getAgentConfig, getAgentContext, mockFunction, testLogger } from '../../../../../core/tests'
-import { anoncreds } from './../../../../tests/helpers'
+import { NativeAnoncreds } from './../../../../tests/helpers'
 import { InMemoryAnonCredsRegistry } from '../../../../tests/InMemoryAnonCredsRegistry'
 import { AnonCredsModuleConfig } from '../../../AnonCredsModuleConfig'
 import { AnonCredsRsHolderService } from '../../../anoncreds-rs'
 import { AnonCredsCredentialRecord } from '../../../repository'
 import { AnonCredsHolderServiceSymbol, AnonCredsRegistryService } from '../../../services'
-import { getQualifiedDidIndyDid, getUnQualifiedDidIndyDid, isUnqualifiedIndyDid } from '../../../utils/indyIdentifiers'
 import * as testModule from '../anonCredsCredentialRecord'
+import { getQualifiedDidIndyDid, isUnqualifiedIndyDid } from '../unqualifiedIndyIdentifiers'
 
 const agentConfig = getAgentConfig('Migration AnonCreds Credential Records 0.4-0.5')
 const registry = new InMemoryAnonCredsRegistry()
 const anonCredsModuleConfig = new AnonCredsModuleConfig({
-  anoncreds,
+  anoncreds: NativeAnoncreds,
   registries: [registry],
 })
 
@@ -78,10 +84,10 @@ const agentContext = getAgentContext({
     [AnonCredsRegistryService, new AnonCredsRegistryService()],
     [DidResolverService, new DidResolverService(testLogger, new DidsModuleConfig(), {} as unknown as DidRepository)],
     [InjectionSymbols.Logger, testLogger],
-    [W3cCredentialsModuleConfig, new W3cCredentialsModuleConfig()],
     [AnonCredsModuleConfig, anonCredsModuleConfig],
     [AnonCredsHolderServiceSymbol, new AnonCredsRsHolderService()],
-    [SignatureSuiteToken, 'default'],
+    [JsonLdModuleConfig, new JsonLdModuleConfig({ documentLoader: defaultDocumentLoader })],
+    [SignatureSuiteRegistry, new SignatureSuiteRegistry()],
   ],
   agentConfig,
 })
@@ -160,26 +166,28 @@ describe('0.4-0.5 | AnonCredsRecord', () => {
       })
     })
 
-    it('credential with unqualified did:indy (bcovrin:test) identifiers', async () => {
+    it('revocable credential with cached unqualified did:indy (bcovrin:test) identifiers', async () => {
+      inMemoryLruCache.get.mockReturnValueOnce({ indyNamespace: 'bcovrin:test' })
+
       await testMigration(agent, {
-        issuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjH'),
-        schemaIssuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG'),
-        schemaId: getUnQualifiedDidIndyDid(
-          'did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG/anoncreds/v0/SCHEMA/Employee Credential/1.0.0'
-        ),
+        issuerId: 'SDqTzbVuCowusqGBNbNDjH',
+        schemaIssuerId: 'SDqTzbVuCowusqGBNbNDjG',
+        schemaId: 'SDqTzbVuCowusqGBNbNDjG:2:Employee Credential:1.0.0',
         indyNamespace: 'bcovrin:test',
+        shouldBeInCache: 'indy',
+        revocable: true,
       })
     })
 
-    it('revocable credential with unqualified did:indy (bcovrin:test) identifiers', async () => {
+    it('does not migrate a credential with unqualified identifiers when the indy namespace is not cached', async () => {
+      inMemoryLruCache.get.mockReturnValueOnce(null).mockReturnValueOnce(null)
+
       await testMigration(agent, {
-        issuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjH'),
-        schemaIssuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG'),
-        schemaId: getUnQualifiedDidIndyDid(
-          'did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG/anoncreds/v0/SCHEMA/Employee Credential/1.0.0'
-        ),
+        issuerId: 'SDqTzbVuCowusqGBNbNDjH',
+        schemaIssuerId: 'SDqTzbVuCowusqGBNbNDjG',
+        schemaId: 'SDqTzbVuCowusqGBNbNDjG:2:Employee Credential:1.0.0',
         indyNamespace: 'bcovrin:test',
-        revocable: true,
+        expectFailure: true,
       })
     })
 
@@ -187,11 +195,9 @@ describe('0.4-0.5 | AnonCredsRecord', () => {
       inMemoryLruCache.get.mockReturnValueOnce({ indyNamespace: 'bcovrin:test' })
 
       await testMigration(agent, {
-        issuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjH'),
-        schemaIssuerId: getUnQualifiedDidIndyDid('did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG'),
-        schemaId: getUnQualifiedDidIndyDid(
-          'did:indy:bcovrin:test:SDqTzbVuCowusqGBNbNDjG/anoncreds/v0/SCHEMA/Employee Credential/1.0.0'
-        ),
+        issuerId: 'SDqTzbVuCowusqGBNbNDjH',
+        schemaIssuerId: 'SDqTzbVuCowusqGBNbNDjG',
+        schemaId: 'SDqTzbVuCowusqGBNbNDjG:2:Employee Credential:1.0.0',
         indyNamespace: 'bcovrin:test',
         shouldBeInCache: 'indy',
       })
@@ -220,9 +226,10 @@ async function testMigration(
     indyNamespace?: string
     shouldBeInCache?: 'indy' | 'sov'
     revocable?: boolean
+    expectFailure?: boolean
   }
 ) {
-  const { issuerId, schemaIssuerId, schemaId, indyNamespace, revocable } = options
+  const { issuerId, schemaIssuerId, schemaId, indyNamespace, revocable, expectFailure } = options
 
   const registry = agentContext.dependencyManager
     .resolve(AnonCredsRegistryService)
@@ -259,7 +266,7 @@ async function testMigration(
   // We'll use unqualified form in case the inputs are unqualified as well
   const credentialDefinitionId =
     indyNamespace && isUnqualifiedIndyDid(issuerId)
-      ? getUnQualifiedDidIndyDid(credentialDefinitionState.credentialDefinitionId)
+      ? getUnqualifiedIdentifier(credentialDefinitionState.credentialDefinitionId)
       : credentialDefinitionState.credentialDefinitionId
   let revocationRegistryDefinitionId: string | undefined
 
@@ -288,7 +295,7 @@ async function testMigration(
 
     revocationRegistryDefinitionId =
       indyNamespace && isUnqualifiedIndyDid(issuerId)
-        ? getUnQualifiedDidIndyDid(revocationRegistryDefinitionState.revocationRegistryDefinitionId)
+        ? getUnqualifiedIdentifier(revocationRegistryDefinitionState.revocationRegistryDefinitionId)
         : revocationRegistryDefinitionState.revocationRegistryDefinitionId
   }
 
@@ -372,19 +379,24 @@ async function testMigration(
 
   await testModule.storeAnonCredsInW3cFormatV0_5(agent)
 
-  const unqualifiedDidIndyDid = isUnqualifiedIndyDid(issuerId)
-  if (unqualifiedDidIndyDid) {
-    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(
-      options.shouldBeInCache === 'sov' || !options.shouldBeInCache ? 2 : 1
-    )
-    expect(inMemoryLruCache.get).toHaveBeenCalledWith(
-      agent.context,
-      options.shouldBeInCache === 'sov' || !options.shouldBeInCache
-        ? `IndySdkPoolService:${issuerId}`
-        : `IndyVdrPoolService:${issuerId}`
-    )
-  } else {
+  if (expectFailure) {
+    // The migration logs the error and keeps the legacy record
+    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(2)
+    expect(w3cRepo.save).toHaveBeenCalledTimes(0)
+    expect(anonCredsRepo.delete).toHaveBeenCalledTimes(0)
+    return
+  }
+
+  if (!isUnqualifiedIndyDid(issuerId)) {
     expect(inMemoryLruCache.get).toHaveBeenCalledTimes(0)
+  } else if (options.shouldBeInCache === 'indy') {
+    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(1)
+    expect(inMemoryLruCache.get).toHaveBeenCalledWith(agent.context, `IndyVdrPoolService:${issuerId}`, {
+      scope: 'global',
+    })
+  } else {
+    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(2)
+    expect(inMemoryLruCache.get).toHaveBeenCalledWith(agent.context, `IndySdkPoolService:${issuerId}`)
   }
 
   expect(anonCredsRepo.getAll).toHaveBeenCalledTimes(1)
@@ -422,12 +434,23 @@ async function testMigration(
       })
     )
   }
+}
 
-  if (unqualifiedDidIndyDid && options.shouldBeInCache) {
-    expect(inMemoryLruCache.get).toHaveReturnedWith({ indyNamespace })
-  } else if (unqualifiedDidIndyDid && !options.shouldBeInCache) {
-    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(2)
-  } else {
-    expect(inMemoryLruCache.get).toHaveBeenCalledTimes(0)
+/**
+ * Converts a did:indy credential definition id or revocation registry id into the
+ * unqualified form that storage version 0.4 used.
+ */
+function getUnqualifiedIdentifier(identifier: string) {
+  if (isDidIndyCredentialDefinitionId(identifier)) {
+    const { namespaceIdentifier, schemaSeqNo, tag } = parseIndyCredentialDefinitionId(identifier)
+    return `${namespaceIdentifier}:3:CL:${schemaSeqNo}:${tag}`
   }
+
+  if (isDidIndyRevocationRegistryId(identifier)) {
+    const { namespaceIdentifier, schemaSeqNo, credentialDefinitionTag, revocationRegistryTag } =
+      parseIndyRevocationRegistryId(identifier)
+    return `${namespaceIdentifier}:4:${namespaceIdentifier}:3:CL:${schemaSeqNo}:${credentialDefinitionTag}:CL_ACCUM:${revocationRegistryTag}`
+  }
+
+  throw new CredoError(`Cannot create unqualified identifier for '${identifier}'`)
 }

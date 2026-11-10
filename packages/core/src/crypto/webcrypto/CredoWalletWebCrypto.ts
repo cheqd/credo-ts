@@ -1,9 +1,8 @@
-import { p256, p384 } from '@noble/curves/nist.js'
+import { p256, p384, p521 } from '@noble/curves/nist.js'
 import { AsnConvert, AsnParser } from '@peculiar/asn1-schema'
 import { SubjectPublicKeyInfo } from '@peculiar/asn1-x509'
 import type { AgentContext } from '../../agent'
 import { KeyManagementApi, PublicJwk } from '../../modules/kms'
-import type { AnyUint8Array, Uint8ArrayBuffer } from '../../types'
 import { Hasher } from '../hashes'
 import { CredoWebCryptoError } from './CredoWebCryptoError'
 import { CredoWebCryptoKey } from './CredoWebCryptoKey'
@@ -29,14 +28,14 @@ export class CredoWalletWebCrypto {
   public generateRandomValues<T extends ArrayBufferView | null>(array: T): T {
     if (!array) return array
 
-    return this.kms.randomBytes({ length: array.byteLength }) as unknown as T
+    // Web Crypto fills the passed array in place, callers may ignore the return value.
+    new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(
+      this.kms.randomBytes({ length: array.byteLength })
+    )
+    return array
   }
 
-  public async sign(
-    key: CredoWebCryptoKey,
-    message: AnyUint8Array,
-    algorithm: KeySignParams
-  ): Promise<Uint8ArrayBuffer> {
+  public async sign(key: CredoWebCryptoKey, message: Uint8Array, algorithm: KeySignParams): Promise<Uint8Array> {
     const jwaAlgorithm = keyParamsToJwaAlgorithm(algorithm, key)
 
     const keyId = key.publicJwk.keyId
@@ -52,8 +51,8 @@ export class CredoWalletWebCrypto {
   public async verify(
     key: CredoWebCryptoKey,
     algorithm: KeyVerifyParams,
-    message: AnyUint8Array,
-    signature: AnyUint8Array
+    message: Uint8Array,
+    signature: Uint8Array
   ): Promise<boolean> {
     const publicKey = key.publicJwk.publicKey
 
@@ -88,6 +87,18 @@ export class CredoWalletWebCrypto {
           lowS: false,
         })
       }
+      if (publicKey.kty === 'EC' && publicKey.crv === 'P-521' && hashAlg !== 'SHA-512') {
+        if (hashAlg !== 'SHA-256' && hashAlg !== 'SHA-384') {
+          throw new CredoWebCryptoError(
+            `Hash Alg: ${hashAlg} is not supported with key type ${publicKey.crv} currently`
+          )
+        }
+
+        return p521.verify(signature, Hasher.hash(message, hashAlg.toLowerCase()), publicKey.publicKey, {
+          prehash: false,
+          lowS: false,
+        })
+      }
     }
 
     const jwaAlgorithm = keyParamsToJwaAlgorithm(algorithm, key)
@@ -113,7 +124,7 @@ export class CredoWalletWebCrypto {
 
   public async importKey(
     format: KeyFormat,
-    keyData: AnyUint8Array | JsonWebKey,
+    keyData: Uint8Array | JsonWebKey,
     algorithm: KeyImportParams,
     extractable: boolean,
     keyUsages: Array<KeyUsage>
@@ -132,7 +143,7 @@ export class CredoWalletWebCrypto {
         return new CredoWebCryptoKey(publicJwk, algorithm as KeyGenAlgorithm, extractable, 'public', keyUsages)
       }
       case 'spki': {
-        const subjectPublicKey = AsnParser.parse(keyData as AnyUint8Array, SubjectPublicKeyInfo)
+        const subjectPublicKey = AsnParser.parse(keyData as Uint8Array, SubjectPublicKeyInfo)
         const publicJwk = spkiToPublicJwk(subjectPublicKey)
 
         return new CredoWebCryptoKey(publicJwk, algorithm as KeyGenAlgorithm, extractable, 'public', keyUsages)
@@ -142,7 +153,7 @@ export class CredoWalletWebCrypto {
     }
   }
 
-  public async exportKey(format: KeyFormat, key: CredoWebCryptoKey): Promise<Uint8ArrayBuffer | JsonWebKey> {
+  public async exportKey(format: KeyFormat, key: CredoWebCryptoKey): Promise<Uint8Array | JsonWebKey> {
     switch (format.toLowerCase()) {
       case 'jwk': {
         return key.publicJwk.toJson()

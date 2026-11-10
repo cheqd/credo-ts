@@ -13,6 +13,7 @@ import { transformPrivateKeyToPrivateJwk } from '../../askar/src'
 
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions, CheqdDidUpdateOptions } from '../src'
+import { CheqdDidRegistrar } from '../src'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 import { validService } from './testUtils'
 
@@ -33,7 +34,7 @@ describe('Cheqd DID registrar', () => {
   it('should create a did:cheqd did', async () => {
     // Generate a seed and the cheqd did. This allows us to create a new did every time
     // but still check if the created output document is as expected.
-    const privateKey = TypedArrayEncoder.fromString(
+    const privateKey = TypedArrayEncoder.fromUtf8String(
       Array(32 + 1)
         .join(`${Math.random().toString(36)}00000000000000000`.slice(2, 18))
         .slice(0, 32)
@@ -271,6 +272,38 @@ describe('Cheqd DID registrar', () => {
       didState: {
         state: 'finished',
       },
+    })
+  })
+
+  describe('createResource with string data', () => {
+    // Bytes that encode with '+' and '/' in base64 and with '-' and '_' in base64url
+    const bytes = new Uint8Array([0xfb, 0xff, 0xbe, 0xfb, 0xef])
+
+    it.each([
+      ['standard base64', TypedArrayEncoder.toBase64(bytes)],
+      ['base64url without padding', TypedArrayEncoder.toBase64Url(bytes)],
+    ])('writes a resource whose data is %s', async (_name, data) => {
+      // Same payer as the rest of this file, so the writes run in order and cannot race on the account sequence
+      const didResult = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: {
+          createKey: { type: { kty: 'OKP', crv: 'Ed25519' } },
+          network: 'testnet',
+          methodSpecificIdAlgo: 'uuid',
+        },
+      })
+      if (!didResult.didState.did) throw new Error('No DID created')
+
+      const registrar = agent.dependencyManager.resolve(CheqdDidRegistrar)
+      const result = await registrar.createResource(agent.context, didResult.didState.did, {
+        id: utils.uuid(),
+        name: 'BinaryResource',
+        resourceType: 'test',
+        data,
+        version: '1',
+      })
+
+      expect(result.resourceState).toMatchObject({ state: 'finished' })
     })
   })
 })

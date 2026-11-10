@@ -6,7 +6,9 @@ import { GenericRecordsModule } from '../../modules/generic-records'
 import { KeyManagementModule } from '../../modules/kms'
 import { MdocModule } from '../../modules/mdoc'
 import { SdJwtVcModule } from '../../modules/sd-jwt-vc'
-import { W3cCredentialsModule } from '../../modules/vc'
+import { TokenStatusListModule } from '../../modules/token-status-list/TokenStatusListModule'
+import { JsonLdModule, W3cCredentialsModule, W3cV2CredentialsModule } from '../../modules/vc'
+import { W3cDataIntegrityModule } from '../../modules/w3c-di'
 import { X509Module } from '../../modules/x509'
 import type { Module } from '../../plugins'
 import { DependencyManager, injectable } from '../../plugins'
@@ -56,11 +58,15 @@ describe('AgentModules', () => {
         genericRecords: expect.any(GenericRecordsModule),
         dids: expect.any(DidsModule),
         kms: expect.any(KeyManagementModule),
+        jsonLd: expect.any(JsonLdModule),
         w3cCredentials: expect.any(W3cCredentialsModule),
+        w3cV2Credentials: expect.any(W3cV2CredentialsModule),
+        w3cDataIntegrity: expect.any(W3cDataIntegrityModule),
         sdJwtVc: expect.any(SdJwtVcModule),
         mdoc: expect.any(MdocModule),
         x509: expect.any(X509Module),
         cache: expect.any(CacheModule),
+        tokenStatusList: expect.any(TokenStatusListModule),
       })
     })
 
@@ -76,11 +82,15 @@ describe('AgentModules', () => {
         genericRecords: expect.any(GenericRecordsModule),
         dids: expect.any(DidsModule),
         kms: expect.any(KeyManagementModule),
+        jsonLd: expect.any(JsonLdModule),
         w3cCredentials: expect.any(W3cCredentialsModule),
+        w3cV2Credentials: expect.any(W3cV2CredentialsModule),
+        w3cDataIntegrity: expect.any(W3cDataIntegrityModule),
         cache: expect.any(CacheModule),
         sdJwtVc: expect.any(SdJwtVcModule),
         mdoc: expect.any(MdocModule),
         x509: expect.any(X509Module),
+        tokenStatusList: expect.any(TokenStatusListModule),
         myModule,
       })
     })
@@ -99,11 +109,15 @@ describe('AgentModules', () => {
         dcql: expect.any(DcqlModule),
         dids: expect.any(DidsModule),
         kms: expect.any(KeyManagementModule),
+        jsonLd: expect.any(JsonLdModule),
         w3cCredentials: expect.any(W3cCredentialsModule),
+        w3cV2Credentials: expect.any(W3cV2CredentialsModule),
+        w3cDataIntegrity: expect.any(W3cDataIntegrityModule),
         cache: expect.any(CacheModule),
         sdJwtVc: expect.any(SdJwtVcModule),
         mdoc: expect.any(MdocModule),
         x509: expect.any(X509Module),
+        tokenStatusList: expect.any(TokenStatusListModule),
         myModule,
       })
     })

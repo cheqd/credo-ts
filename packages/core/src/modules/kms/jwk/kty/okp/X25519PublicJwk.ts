@@ -1,15 +1,14 @@
-import type { AnyUint8Array } from '../../../../../types'
 import { KnownJwaKeyAgreementAlgorithms, type KnownJwaSignatureAlgorithm } from '../../jwa'
 import type { PublicJwkType } from '../PublicJwk'
 import type { KmsJwkPublicOkp } from './okpJwk'
-import { okpPublicJwkToPublicKey, okpPublicKeyToPublicJwk } from './okpPublicKey'
+import { okpMulticodecToPublicJwk, okpPublicJwkToPublicKey, okpPublicKeyToPublicJwk } from './okpPublicKey'
 
 type Jwk = KmsJwkPublicOkp & { crv: 'X25519' }
 
 export class X25519PublicJwk implements PublicJwkType<Jwk> {
   public static supportedEncryptionKeyAgreementAlgorithms = [KnownJwaKeyAgreementAlgorithms.ECDH_HSALSA20]
   public static supportedSignatureAlgorithms: KnownJwaSignatureAlgorithm[] = []
-  public static multicodecPrefix = 236
+  public static multicodecPrefix = 0xec
 
   public supportedEncryptionKeyAgreementAlgorithms = X25519PublicJwk.supportedEncryptionKeyAgreementAlgorithms
   public supportedSignatureAlgorithms = X25519PublicJwk.supportedSignatureAlgorithms
@@ -36,13 +35,13 @@ export class X25519PublicJwk implements PublicJwkType<Jwk> {
     return okpPublicJwkToPublicKey(this.jwk)
   }
 
-  public static fromPublicKey(publicKey: AnyUint8Array) {
+  public static fromPublicKey(publicKey: Uint8Array) {
     const jwk = okpPublicKeyToPublicJwk(publicKey, 'X25519')
     return new X25519PublicJwk(jwk)
   }
 
-  public static fromMulticodec(multicodec: AnyUint8Array) {
-    const jwk = okpPublicKeyToPublicJwk(multicodec, 'X25519')
+  public static fromMulticodec(multicodec: Uint8Array) {
+    const jwk = okpMulticodecToPublicJwk(multicodec, 'X25519')
     return new X25519PublicJwk(jwk)
   }
 }

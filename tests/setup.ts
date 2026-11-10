@@ -8,7 +8,8 @@ import { LogLevel } from '../packages/core/src/logger/Logger'
 import testLogger from '../packages/core/tests/logger'
 
 // Get test file path at module load
-const testPath = expect.getState().testPath
+const testPath = expect.getState()?.testPath
+
 const relativeTestPath = testPath ? path.relative(process.cwd(), testPath) : undefined
 
 // Create a log file name based on test file
@@ -18,7 +19,7 @@ const logPath = logFileName ? path.join(logDir, logFileName) : undefined
 
 const logEntries: Array<object> = []
 if (logPath && process.env.COLLECT_FAILED_TEST_LOGS === 'true') {
-  testLogger.logLevel = LogLevel.trace
+  testLogger.logLevel = LogLevel.Trace
   testLogger.logger.attachTransport((logEntry) => logEntries.push(logEntry))
   testLogger.logger.settings.minLevel = 0
   testLogger.logger.settings.type = 'hidden'
@@ -119,13 +120,4 @@ function toBeConnectedWith(actual: DidCommConnectionRecord, expected: DidCommCon
     message: () => `expected connection ${actual.theirDid} to be connected to with ${expected.did}`,
     pass: false,
   }
-}
-
-interface CustomMatchers<R = unknown> {
-  toBeConnectedWith(connection: DidCommConnectionRecord): R
-}
-
-declare module 'vitest' {
-  // biome-ignore lint/suspicious/noExplicitAny: no explanation
-  interface Matchers<T = any> extends CustomMatchers<T> {}
 }

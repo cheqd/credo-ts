@@ -6,27 +6,42 @@ import { DidDocument } from '../../domain'
 import type { DidResolver } from '../../domain/DidResolver'
 import type { DidResolutionOptions, DidResolutionResult, ParsedDid } from '../../types'
 
+export interface WebDidResolverOptions {
+  /**
+   * Maximum size in bytes of a fetched DID document.
+   *
+   * @default the `maxResponseBytes` of the agent's `fetchLimits`
+   */
+  maxDidDocumentBytes?: number
+}
+
 export class WebDidResolver implements DidResolver {
   public readonly supportedMethods
 
   public readonly allowsCaching = true
   public readonly allowsLocalDidRecord = true
 
-  // FIXME: Would be nice if we don't have to provide a did resolver instance
-  private _resolverInstance = new Resolver()
   private resolver = didWeb.getResolver()
+  private options: WebDidResolverOptions
 
-  public constructor() {
+  public constructor(options: WebDidResolverOptions = {}) {
     this.supportedMethods = Object.keys(this.resolver)
+    this.options = options
   }
 
   public async resolve(
-    _agentContext: AgentContext,
+    agentContext: AgentContext,
     did: string,
-    parsed: ParsedDid,
+    _parsed: ParsedDid,
     didResolutionOptions: DidResolutionOptions
   ): Promise<DidResolutionResult> {
-    const result = await this.resolver[parsed.method](did, parsed, this._resolverInstance, didResolutionOptions)
+    const didResolver = new Resolver(
+      didWeb.getResolver({
+        fetch: (url, init) =>
+          agentContext.config.fetch(url, { ...init, maxResponseBytes: this.options.maxDidDocumentBytes }),
+      })
+    )
+    const result = await didResolver.resolve(did, didResolutionOptions)
 
     let didDocument = null
 

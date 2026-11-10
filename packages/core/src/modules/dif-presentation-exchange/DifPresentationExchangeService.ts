@@ -12,6 +12,7 @@ import { CredoError } from '../../error'
 import { injectable } from '../../plugins'
 import type { Query } from '../../storage/StorageService'
 import { JsonTransformer } from '../../utils'
+import { uuid } from '../../utils/uuid'
 import type { VerificationMethod } from '../dids'
 import { DidsApi, getPublicJwkFromVerificationMethod } from '../dids'
 import { getJwkHumanDescription } from '../kms'
@@ -27,12 +28,12 @@ import {
   W3cCredentialService,
   W3cPresentation,
 } from '../vc'
-import { purposes } from '../vc/data-integrity/libraries/jsonld-signatures'
-import type { IAnonCredsDataIntegrityService } from '../vc/data-integrity/models/IAnonCredsDataIntegrityService'
+import type { IAnonCredsW3cCredentialService } from '../vc/anoncreds-w3c-credential'
 import {
-  ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE,
-  AnonCredsDataIntegrityServiceSymbol,
-} from '../vc/data-integrity/models/IAnonCredsDataIntegrityService'
+  ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE,
+  AnonCredsW3cCredentialServiceSymbol,
+} from '../vc/anoncreds-w3c-credential'
+import { purposes } from '../vc/linked-data-proofs/adapters/jsonld-signatures-adapter'
 import { DifPresentationExchangeError } from './DifPresentationExchangeError'
 import type {
   DifPexCredentialsForRequest,
@@ -67,7 +68,7 @@ export class DifPresentationExchangeService {
     presentationDefinition: DifPresentationExchangeDefinition
   ): Promise<DifPexCredentialsForRequest> {
     const credentialRecords = await this.queryCredentialForPresentationDefinition(agentContext, presentationDefinition)
-    return getCredentialsForRequest(this.pex, presentationDefinition, credentialRecords)
+    return getCredentialsForRequest(agentContext, this.pex, presentationDefinition, credentialRecords)
   }
 
   /**
@@ -183,7 +184,6 @@ export class DifPresentationExchangeService {
     for (const presentationToCreate of presentationsToCreate) {
       // We create a presentation for each subject
       // Thus for each subject we need to filter all the related input descriptors and credentials
-      // FIXME: cast to V1, as tsc errors for strange reasons if not
       const inputDescriptorIds = presentationToCreate.verifiableCredentials.map((c) => c.inputDescriptorId)
       const inputDescriptorsForPresentation = (
         presentationDefinition as DifPresentationExchangeDefinitionV1
@@ -203,19 +203,20 @@ export class DifPresentationExchangeService {
             'Currently a Mdoc presentation can only be created from a single credential'
           )
         }
-        const mdocRecord = presentationToCreate.verifiableCredentials[0].credential
+
         if (!mdocSessionTranscript) {
           throw new DifPresentationExchangeError(
             'Missing mdoc session transcript options for creating MDOC presentation.'
           )
         }
 
-        const { deviceResponseBase64Url, presentationSubmission } =
-          await MdocDeviceResponse.createPresentationDefinitionDeviceResponse(agentContext, {
-            mdocs: [mdocRecord.firstCredential],
-            presentationDefinition: presentationDefinition,
-            sessionTranscriptOptions: mdocSessionTranscript,
-          })
+        const { credential, inputDescriptorId } = presentationToCreate.verifiableCredentials[0]
+
+        const deviceResponse = await MdocDeviceResponse.createDeviceResponseWithPresentationDefinition(agentContext, {
+          mdocs: [credential.firstCredential],
+          presentationDefinition,
+          sessionTranscriptOptions: mdocSessionTranscript,
+        })
 
         if (presentationSubmissionLocation !== DifPresentationExchangeSubmissionLocation.EXTERNAL) {
           throw new DifPresentationExchangeError(
@@ -225,8 +226,18 @@ export class DifPresentationExchangeService {
 
         verifiablePresentationResultsWithFormat.push({
           verifiablePresentationResult: {
-            presentationSubmission: presentationSubmission,
-            verifiablePresentations: [deviceResponseBase64Url],
+            presentationSubmission: {
+              id: `MdocPresentationSubmission ${uuid()}`,
+              definition_id: presentationDefinition.id,
+              descriptor_map: [
+                {
+                  id: inputDescriptorId,
+                  format: 'mso_mdoc',
+                  path: '$',
+                },
+              ],
+            },
+            verifiablePresentations: [deviceResponse.encoded],
             presentationSubmissionLocation,
           },
           claimFormat: presentationToCreate.claimFormat,
@@ -237,10 +248,10 @@ export class DifPresentationExchangeService {
           getSphereonOriginalVerifiableCredential(c.credential)
         )
 
-        const extraProofOptions = this.shouldSignUsingAnonCredsDataIntegrity(presentationToCreate)
+        const extraProofOptions = this.shouldSignWithAnonCredsW3cService(presentationToCreate)
           ? {
               typeSupportsSelectiveDisclosure: true,
-              type: `DataIntegrityProof.${ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE}`,
+              type: `DataIntegrityProof.${ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE}`,
             }
           : {}
 
@@ -457,10 +468,10 @@ export class DifPresentationExchangeService {
 
   /**
    * if all submission descriptors have a format of di | ldp,
-   * and all credentials have an ANONCREDS_DATA_INTEGRITY proof we default to
-   * signing the presentation using the ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE
+   * and all credentials have an anoncreds W3C credential proof we default to
+   * signing the presentation using the ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE
    */
-  private shouldSignUsingAnonCredsDataIntegrity(
+  private shouldSignWithAnonCredsW3cService(
     presentationToCreate: PresentationToCreate,
     presentationSubmission?: DifPresentationExchangeSubmission
   ) {
@@ -474,15 +485,13 @@ export class DifPresentationExchangeService {
         )
       )
 
-    const credentialAreSignedUsingAnonCredsDataIntegrity = presentationToCreate.verifiableCredentials.every(
-      ({ credential }) => {
-        const firstCredential = credential.firstCredential
-        if (firstCredential.claimFormat !== ClaimFormat.LdpVc) return false
-        return firstCredential.dataIntegrityCryptosuites.includes(ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE)
-      }
-    )
+    const credentialsAreSignedWithAnonCredsW3c = presentationToCreate.verifiableCredentials.every(({ credential }) => {
+      const firstCredential = credential.firstCredential
+      if (firstCredential.claimFormat !== ClaimFormat.LdpVc) return false
+      return firstCredential.anonCredsW3cCredentialCryptosuites.includes(ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE)
+    })
 
-    return validDescriptorFormat && credentialAreSignedUsingAnonCredsDataIntegrity
+    return validDescriptorFormat && credentialsAreSignedWithAnonCredsW3c
   }
 
   private getPresentationSignCallback(agentContext: AgentContext, presentationToCreate: PresentationToCreate) {
@@ -526,16 +535,16 @@ export class DifPresentationExchangeService {
         return signedPresentation.encoded as W3CVerifiablePresentation
       }
       if (presentationToCreate.claimFormat === ClaimFormat.LdpVp) {
-        if (this.shouldSignUsingAnonCredsDataIntegrity(presentationToCreate, presentationSubmission)) {
+        if (this.shouldSignWithAnonCredsW3cService(presentationToCreate, presentationSubmission)) {
           // make sure the descriptors format properties are set correctly
           presentationSubmission.descriptor_map = presentationSubmission.descriptor_map.map((descriptor) => ({
             ...descriptor,
             format: 'di_vp',
           }))
-          const anoncredsDataIntegrityService = agentContext.dependencyManager.resolve<IAnonCredsDataIntegrityService>(
-            AnonCredsDataIntegrityServiceSymbol
+          const anoncredsW3cCredentialService = agentContext.dependencyManager.resolve<IAnonCredsW3cCredentialService>(
+            AnonCredsW3cCredentialServiceSymbol
           )
-          const presentation = await anoncredsDataIntegrityService.createPresentation(agentContext, {
+          const presentation = await anoncredsW3cCredentialService.createPresentation(agentContext, {
             presentationDefinition,
             presentationSubmission,
             selectedCredentialRecords: presentationToCreate.verifiableCredentials.map((vc) => vc.credential),
@@ -630,11 +639,7 @@ export class DifPresentationExchangeService {
 
     // the signature suite to use for the presentation is dependant on the credentials we share.
     // 1. Get the verification method for this given proof purpose in this DID document
-    let [verificationMethod] = didDocument.authentication
-    if (typeof verificationMethod === 'string') {
-      verificationMethod = didDocument.dereferenceKey(verificationMethod, ['authentication'])
-    }
-
+    const [verificationMethod] = didDocument.findVerificationMethodsByPurpose(['authentication'])
     return verificationMethod
   }
 

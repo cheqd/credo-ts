@@ -10,7 +10,6 @@ import { getJwkHumanDescription } from './humanDescription'
 import type { KnownJwaKeyAgreementAlgorithm, KnownJwaSignatureAlgorithm } from './jwa'
 import { calculateJwkThumbprint } from './jwkThumbprint'
 import { assertJwkAsymmetric, type KmsJwkPublicAsymmetric, publicJwkFromPrivateJwk, zKmsJwkPublic } from './knownJwk'
-
 import {
   Ed25519PublicJwk,
   P256PublicJwk,
@@ -119,7 +118,7 @@ export class PublicJwk<Jwk extends SupportedPublicJwk = SupportedPublicJwk> {
    * Get the signature algorithms supported for this jwk.
    *
    * If the jwk has an `alg` field defined it will only return that alg
-   * and otherwise return all known supported signature algorithm.
+   * and otherwise return all known supported signature algorithms.
    */
   public get supportedSignatureAlgorithms(): KnownJwaSignatureAlgorithm[] {
     const supportedSignatureAlgorithms: KnownJwaSignatureAlgorithm[] = this.jwk.supportedSignatureAlgorithms ?? []
@@ -210,6 +209,33 @@ export class PublicJwk<Jwk extends SupportedPublicJwk = SupportedPublicJwk> {
     return alg as this['supportedSignatureAlgorithms'][number]
   }
 
+  /**
+   * The `alg` field of the jwk, indicating the algorithm the key is intended to be used with.
+   */
+  public get alg(): string | undefined {
+    return this.jwk.jwk.alg
+  }
+
+  /**
+   * Set the `alg` field of the jwk, indicating the algorithm the key is intended to be used
+   * with. This restricts the jwk to that algorithm (e.g. {@link signatureAlgorithm} will
+   * return the `alg` when defined).
+   *
+   * If the algorithm is not supported by this jwk an error will be thrown.
+   */
+  public set alg(alg: KnownJwaSignatureAlgorithm | KnownJwaKeyAgreementAlgorithm) {
+    const supportedAlgorithms: Array<KnownJwaSignatureAlgorithm | KnownJwaKeyAgreementAlgorithm> = [
+      ...(this.jwk.supportedSignatureAlgorithms ?? []),
+      ...(this.jwk.supportedEncryptionKeyAgreementAlgorithms ?? []),
+    ]
+
+    if (!supportedAlgorithms.includes(alg)) {
+      throw new KeyManagementError(`${this.jwkTypeHumanDescription} does not support alg '${alg}'.`)
+    }
+
+    this.jwk.jwk.alg = alg
+  }
+
   public assertSignatureAlgorithmSupported(
     alg: KnownJwaSignatureAlgorithm
   ): asserts alg is this['supportedSignatureAlgorithms'][number] {
@@ -286,12 +312,14 @@ export class PublicJwk<Jwk extends SupportedPublicJwk = SupportedPublicJwk> {
     Jwk1 extends SupportedPublicJwk,
     Jwk2 extends SupportedPublicJwk = Jwk1,
     Jwk3 extends SupportedPublicJwk = Jwk1,
+    Jwk4 extends SupportedPublicJwk = Jwk1,
   >(
     jwkType1: Constructor<Jwk1>,
     jwkType2?: Constructor<Jwk2>,
-    jwkType3?: Constructor<Jwk3>
-  ): this is PublicJwk<Jwk1> | PublicJwk<Jwk2> | PublicJwk<Jwk3> {
-    const types = [jwkType1, jwkType2, jwkType3].filter(Boolean) as Constructor<SupportedPublicJwk>[]
+    jwkType3?: Constructor<Jwk3>,
+    jwkType4?: Constructor<Jwk4>
+  ): this is PublicJwk<Jwk1> | PublicJwk<Jwk2> | PublicJwk<Jwk3> | PublicJwk<Jwk4> {
+    const types = [jwkType1, jwkType2, jwkType3, jwkType4].filter(Boolean) as Constructor<SupportedPublicJwk>[]
     return types.some((type) => this.jwk.constructor === type)
   }
 

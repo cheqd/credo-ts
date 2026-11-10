@@ -1,12 +1,12 @@
 import {
   getAnonCredsIndyModules,
   prepareForAnonCredsIssuance,
-} from '../../../../../../../anoncreds/tests/legacyAnonCredsSetup'
+} from '../../../../../../../anoncreds/tests/indyAnonCredsSetup'
 import { transformPrivateKeyToPrivateJwk } from '../../../../../../../askar/src'
 import { Agent } from '../../../../../../../core/src/agent/Agent'
 import { CacheModule, InMemoryLruCache } from '../../../../../../../core/src/modules/cache'
-import { W3cCredentialsModule } from '../../../../../../../core/src/modules/vc'
-import { customDocumentLoader } from '../../../../../../../core/src/modules/vc/data-integrity/__tests__/documentLoader'
+import { JsonLdModule } from '../../../../../../../core/src/modules/vc'
+import { customDocumentLoader } from '../../../../../../../core/src/modules/vc/linked-data-proofs/__tests__/documentLoader'
 import { TypedArrayEncoder } from '../../../../../../../core/src/utils'
 import { JsonTransformer } from '../../../../../../../core/src/utils/JsonTransformer'
 import type { EventReplaySubject } from '../../../../../../../core/tests'
@@ -69,7 +69,7 @@ const getIndyJsonLdModules = (extraDidCommConfig: DidCommModuleConfigOptions) =>
     cache: new CacheModule({
       cache: new InMemoryLruCache({ limit: 100 }),
     }),
-    w3cCredentials: new W3cCredentialsModule({
+    jsonLd: new JsonLdModule({
       documentLoader: customDocumentLoader,
     }),
   }) as const
@@ -123,7 +123,7 @@ describe('V2 Credentials - JSON-LD - Ed25519', () => {
 
     const key = await faberAgent.kms.importKey({
       privateJwk: transformPrivateKeyToPrivateJwk({
-        privateKey: TypedArrayEncoder.fromString('testseed000000000000000000000001'),
+        privateKey: TypedArrayEncoder.fromUtf8String('testseed000000000000000000000001'),
         type: {
           crv: 'Ed25519',
           kty: 'OKP',
@@ -319,7 +319,7 @@ describe('V2 Credentials - JSON-LD - Ed25519', () => {
       connectionId: aliceConnectionId,
       protocolVersion: 'v2',
       credentialFormats: {
-        indy: {
+        anoncreds: {
           attributes: credentialPreview.attributes,
           schemaIssuerDid: 'GMm4vMw8LLrLJjp81kRRLp',
           schemaName: 'ahoy',
@@ -350,7 +350,7 @@ describe('V2 Credentials - JSON-LD - Ed25519', () => {
       credentialExchangeRecordId: faberCredentialRecord.id,
       comment: 'V2 W3C & INDY Proposals',
       credentialFormats: {
-        indy: {
+        anoncreds: {
           credentialDefinitionId,
           attributes: credentialPreview.attributes,
         },
@@ -404,7 +404,7 @@ describe('V2 Credentials - JSON-LD - Ed25519', () => {
       formats: [
         {
           attach_id: expect.any(String),
-          format: 'hlindy/cred-abstract@v2.0',
+          format: 'anoncreds/credential-offer@v1.0',
         },
         {
           attach_id: expect.any(String),
@@ -535,7 +535,7 @@ describe('V2 Credentials - JSON-LD - Ed25519', () => {
       formats: [
         {
           attach_id: expect.any(String),
-          format: 'hlindy/cred@v2.0',
+          format: 'anoncreds/credential@v1.0',
         },
         {
           attach_id: expect.any(String),

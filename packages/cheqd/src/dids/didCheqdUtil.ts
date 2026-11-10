@@ -11,7 +11,6 @@ import type { Metadata } from '@cheqd/ts-proto/cheqd/resource/v2'
 import { EnglishMnemonic as _EnglishMnemonic } from '@cosmjs/crypto'
 import { DirectSecp256k1HdWallet, DirectSecp256k1Wallet } from '@cosmjs/proto-signing'
 import {
-  type AnyUint8Array,
   CredoError,
   DidCommV1Service,
   DidDocument,
@@ -157,14 +156,29 @@ export function filterResourcesByNameAndType(resources: Metadata[], name: string
   return resources.filter((resource) => resource.name === name && resource.resourceType === type)
 }
 
-export async function renderResourceData(data: AnyUint8Array, mimeType: string) {
+/**
+ * Decodes a string resource payload that may be standard base64 or base64url (padded or not).
+ *
+ * `renderResourceData` returns base64url for binary resources, so a resolved payload can be fed straight
+ * back into `createResource`. `TypedArrayEncoder.fromBase64` only accepts standard base64, so try that first
+ * (identical result for strings valid in both alphabets) and fall back to base64url.
+ */
+export function decodeBase64OrBase64Url(data: string): Uint8Array {
+  try {
+    return TypedArrayEncoder.fromBase64(data)
+  } catch {
+    return TypedArrayEncoder.fromBase64Url(data)
+  }
+}
+
+export async function renderResourceData(data: Uint8Array, mimeType: string) {
   if (mimeType === 'application/json') {
-    return await JsonEncoder.fromBuffer(data)
+    return await JsonEncoder.fromUint8Array(data)
   }
   if (mimeType === 'text/plain') {
     return TypedArrayEncoder.toUtf8String(data)
   }
-  return TypedArrayEncoder.toBase64URL(data)
+  return TypedArrayEncoder.toBase64Url(data)
 }
 
 export class EnglishMnemonic extends _EnglishMnemonic {
@@ -177,5 +191,5 @@ export function getCosmosPayerWallet(cosmosPayerSeed?: string) {
   }
   return EnglishMnemonic._mnemonicMatcher.test(cosmosPayerSeed)
     ? DirectSecp256k1HdWallet.fromMnemonic(cosmosPayerSeed, { prefix: 'cheqd' })
-    : DirectSecp256k1Wallet.fromKey(TypedArrayEncoder.fromString(cosmosPayerSeed.replace(/^0x/, '')), 'cheqd')
+    : DirectSecp256k1Wallet.fromKey(TypedArrayEncoder.fromUtf8String(cosmosPayerSeed.replace(/^0x/, '')), 'cheqd')
 }

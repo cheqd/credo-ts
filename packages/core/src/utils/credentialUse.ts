@@ -27,7 +27,7 @@ import {
   CredentialMultiInstanceUseUpdateMode,
 } from './credentialUseTypes'
 
-export { CredentialMultiInstanceUseMode, CredentialMultiInstanceUseUpdateMode, CredentialMultiInstanceState }
+export { CredentialMultiInstanceState, CredentialMultiInstanceUseMode, CredentialMultiInstanceUseUpdateMode }
 
 type CredentialRecord = W3cCredentialRecord | SdJwtVcRecord | MdocRecord | W3cV2CredentialRecord
 
@@ -136,7 +136,7 @@ export async function useInstanceFromCredentialRecord<Record extends CredentialR
   credentialRecord,
   useMode,
   agentContext,
-  updateMode,
+  updateMode = CredentialMultiInstanceUseUpdateMode.RefetchAndUpdateWithLock,
 }: UseInstanceFromCredentialRecordOptions<Record>): Promise<UseInstanceFromCredentialRecordReturn<Record>> {
   let extractResult = extractInstanceAndUpdateRecord({
     credentialRecord,

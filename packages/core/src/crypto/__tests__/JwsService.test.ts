@@ -1,6 +1,6 @@
 import type { X509Certificate } from '@credo-ts/core'
 import { CredoError, X509ModuleConfig, X509Service } from '@credo-ts/core'
-import { askar } from '@openwallet-foundation/askar-nodejs'
+import { NativeAskar } from '@openwallet-foundation/askar-nodejs'
 import { AskarKeyManagementService, AskarModuleConfig, transformPrivateKeyToPrivateJwk } from '../../../../askar/src'
 import { AskarStoreManager } from '../../../../askar/src/AskarStoreManager'
 import { NodeFileSystem } from '../../../../node/src/NodeFileSystem'
@@ -34,20 +34,16 @@ describe('JwsService', () => {
   let didJwszDnaeyKey: PublicJwk<P256PublicJwk>
 
   beforeAll(async () => {
+    const askarModuleConfig = new AskarModuleConfig({
+      askar: NativeAskar,
+      store: getAskarStoreConfig('JwsService'),
+    })
     agentContext = getAgentContext({
       registerInstances: [
         [X509ModuleConfig, new X509ModuleConfig()],
 
-        [
-          AskarStoreManager,
-          new AskarStoreManager(
-            new NodeFileSystem(),
-            new AskarModuleConfig({
-              askar,
-              store: getAskarStoreConfig('JwsService'),
-            })
-          ),
-        ],
+        [AskarModuleConfig, askarModuleConfig],
+        [AskarStoreManager, new AskarStoreManager(new NodeFileSystem(), askarModuleConfig)],
       ],
       kmsBackends: [new AskarKeyManagementService()],
       agentConfig: getAgentConfig('JwsService'),
@@ -60,7 +56,7 @@ describe('JwsService', () => {
       (
         await kms.importKey({
           privateJwk: transformPrivateKeyToPrivateJwk({
-            privateKey: TypedArrayEncoder.fromString(didJwsz6Mkf.SEED),
+            privateKey: TypedArrayEncoder.fromUtf8String(didJwsz6Mkf.SEED),
             type: {
               kty: 'OKP',
               crv: 'Ed25519',
@@ -81,7 +77,7 @@ describe('JwsService', () => {
       (
         await kms.importKey({
           privateJwk: transformPrivateKeyToPrivateJwk({
-            privateKey: TypedArrayEncoder.fromString(didJwsz6Mkv.SEED),
+            privateKey: TypedArrayEncoder.fromUtf8String(didJwsz6Mkv.SEED),
             type: {
               kty: 'OKP',
               crv: 'Ed25519',
@@ -102,7 +98,7 @@ describe('JwsService', () => {
       (
         await kms.importKey({
           privateJwk: transformPrivateKeyToPrivateJwk({
-            privateKey: TypedArrayEncoder.fromString(didJwszDnaey.SEED),
+            privateKey: TypedArrayEncoder.fromUtf8String(didJwszDnaey.SEED),
             type: {
               kty: 'EC',
               crv: 'P-256',
@@ -114,7 +110,7 @@ describe('JwsService', () => {
   })
 
   it('creates a jws for the payload using Ed25519 key', async () => {
-    const payload = JsonEncoder.toBuffer(didJwsz6Mkf.DATA_JSON)
+    const payload = JsonEncoder.toUint8Array(didJwsz6Mkf.DATA_JSON)
     const kid = new DidKey(didJwsz6MkfKey).did
 
     const jws = await jwsService.createJws(agentContext, {
@@ -131,7 +127,7 @@ describe('JwsService', () => {
   })
 
   it('creates and verify a jws using ES256 alg and P-256 kty', async () => {
-    const payload = JsonEncoder.toBuffer(didJwszDnaey.DATA_JSON)
+    const payload = JsonEncoder.toUint8Array(didJwszDnaey.DATA_JSON)
     const kid = new DidKey(didJwszDnaeyKey).did
 
     const jws = await jwsService.createJws(agentContext, {
@@ -148,7 +144,7 @@ describe('JwsService', () => {
   })
 
   it('creates a compact jws', async () => {
-    const payload = JsonEncoder.toBuffer(didJwsz6Mkf.DATA_JSON)
+    const payload = JsonEncoder.toUint8Array(didJwsz6Mkf.DATA_JSON)
 
     const jws = await jwsService.createJwsCompact(agentContext, {
       payload,
@@ -160,12 +156,22 @@ describe('JwsService', () => {
     })
 
     expect(jws).toEqual(
-      `${didJwsz6Mkf.JWS_JSON.protected}.${TypedArrayEncoder.toBase64URL(payload)}.${didJwsz6Mkf.JWS_JSON.signature}`
+      `${didJwsz6Mkf.JWS_JSON.protected}.${TypedArrayEncoder.toBase64Url(payload)}.${didJwsz6Mkf.JWS_JSON.signature}`
     )
   })
 
+  it('throws an error when creating a jws with crit or b64', async () => {
+    await expect(
+      jwsService.createJwsCompact(agentContext, {
+        payload: JsonEncoder.toUint8Array(didJwsz6Mkf.DATA_JSON),
+        keyId: didJwsz6MkfKey.keyId,
+        protectedHeaderOptions: { alg: KnownJwaSignatureAlgorithms.EdDSA, b64: false, crit: ['b64'] },
+      })
+    ).rejects.toThrow("JWS protected header parameters 'crit' and 'b64' are not supported.")
+  })
+
   it('allows both x5c/jwk and kid (no did) to be present', async () => {
-    const payload = JsonEncoder.toBuffer(didJwsz6Mkf.DATA_JSON)
+    const payload = JsonEncoder.toUint8Array(didJwsz6Mkf.DATA_JSON)
 
     const signed1 = await jwsService.createJwsCompact(agentContext, {
       payload,
@@ -284,13 +290,27 @@ describe('JwsService', () => {
       const { isValid, jwsSigners } = await jwsService.verifyJws(agentContext, {
         jws: {
           ...didJwsz6Mkf.JWS_JSON,
-          payload: JsonEncoder.toBase64URL({ ...didJwsz6Mkf, did: 'another_did' }),
+          payload: JsonEncoder.toBase64Url({ ...didJwsz6Mkf, did: 'another_did' }),
         },
       })
 
       expect(isValid).toBe(false)
       expect(jwsSigners).toMatchObject([])
     })
+
+    it.each([{ crit: ['exp'] }, { b64: false, crit: ['b64'] }, { b64: true }])(
+      'throws an error if the protected header contains %o',
+      async (header) => {
+        const protectedHeader = JsonEncoder.toBase64Url({
+          ...JsonEncoder.fromBase64Url(didJwsz6Mkf.JWS_JSON.protected),
+          ...header,
+        })
+
+        await expect(
+          jwsService.verifyJws(agentContext, { jws: { ...didJwsz6Mkf.JWS_JSON, protected: protectedHeader } })
+        ).rejects.toThrow("JWS protected header parameters 'crit' and 'b64' are not supported.")
+      }
+    )
 
     it('throws an error if the jws signatures array does not contain a JWS', async () => {
       await expect(
@@ -327,7 +347,7 @@ describe('JwsService', () => {
     })
 
     it('verifies x5c chain for provided jws signer', async () => {
-      const payload = JsonEncoder.toBuffer(didJwsz6Mkf.DATA_JSON)
+      const payload = JsonEncoder.toUint8Array(didJwsz6Mkf.DATA_JSON)
 
       const signed = await jwsService.createJwsCompact(agentContext, {
         payload,

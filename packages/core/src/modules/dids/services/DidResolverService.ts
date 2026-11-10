@@ -9,6 +9,7 @@ import { DidsModuleConfig } from '../DidsModuleConfig'
 import { DidDocument } from '../domain'
 import type { DidResolver } from '../domain/DidResolver'
 import { parseDid } from '../domain/parse'
+import { getAlternativeDidsForNumAlgo4Did } from '../methods/peer/peerDidNumAlgo4'
 import { DidRepository } from '../repository'
 import type { DidResolutionOptions, DidResolutionResult, ParsedDid } from '../types'
 
@@ -69,30 +70,25 @@ export class DidResolverService {
       persistInCache = true,
       useLocalCreatedDidRecord = true,
     } = options
-    const cacheKey = this.getCacheKey(parsed.did)
+    const { cacheKey, cacheScope } = this.getCacheKeyAndScope(parsed)
 
     if (resolver.allowsCaching && useCache) {
       const cache = agentContext.dependencyManager.resolve(CacheModuleConfig).cache
-      // FIXME: in multi-tenancy it can be that the same cache is used for different agent contexts
-      // This may become a problem when resolving dids, as you can get back a cache hit for a different
-      // tenant. did:peer has disabled caching, and I think we should just recommend disabling caching
-      // for these private dids
-      // We could allow providing a custom cache prefix in the resolver options, so that the cache key
-      // can be recognized in the cache implementation
       const cachedDidDocument = await cache.get<DidResolutionResult & { didDocument: Record<string, unknown> }>(
         agentContext,
-        cacheKey
+        cacheKey,
+        { scope: cacheScope }
       )
 
       if (cachedDidDocument) {
-        return {
+        return this.ensureDidDocumentIdMatchesDid(parsed, {
           ...cachedDidDocument,
           didDocument: JsonTransformer.fromJSON(cachedDidDocument.didDocument, DidDocument),
           didResolutionMetadata: {
             ...cachedDidDocument.didResolutionMetadata,
             servedFromCache: true,
           },
-        }
+        })
       }
     }
 
@@ -104,18 +100,21 @@ export class DidResolverService {
       })
 
       if (didRecord?.didDocument) {
-        return {
+        return this.ensureDidDocumentIdMatchesDid(parsed, {
           didDocument: didRecord.didDocument,
           didDocumentMetadata: {},
           didResolutionMetadata: {
             servedFromCache: false,
             servedFromDidRecord: true,
           },
-        }
+        })
       }
     }
 
-    let resolutionResult = await resolver.resolve(agentContext, parsed.did, parsed, options)
+    let resolutionResult = this.ensureDidDocumentIdMatchesDid(
+      parsed,
+      await resolver.resolve(agentContext, parsed.did, parsed, options)
+    )
     // Avoid overwriting existing document
     resolutionResult = {
       ...resolutionResult,
@@ -138,7 +137,8 @@ export class DidResolverService {
           didDocument: resolutionResult.didDocument.toJSON(),
         },
         // Set cache duration
-        cacheDurationInSeconds
+        cacheDurationInSeconds,
+        { scope: cacheScope }
       )
     }
 
@@ -163,11 +163,41 @@ export class DidResolverService {
 
   public async invalidateCacheForDid(agentContext: AgentContext, did: string) {
     const cache = agentContext.dependencyManager.resolve(CacheModuleConfig).cache
-    await cache.remove(agentContext, this.getCacheKey(did))
+
+    let parsed: ParsedDid
+    try {
+      parsed = parseDid(did)
+    } catch (_error) {
+      // If the did is invalid, there is no cache to invalidate, so we can just return
+      return
+    }
+
+    const { cacheKey, cacheScope } = this.getCacheKeyAndScope(parsed)
+    await cache.remove(agentContext, cacheKey, { scope: cacheScope })
   }
 
-  private getCacheKey(did: string) {
-    return `did:resolver:${did}`
+  /**
+   * A short form did:peer:4 resolves to the document of its long form, which is bound to it by hash.
+   */
+  private ensureDidDocumentIdMatchesDid(parsed: ParsedDid, result: DidResolutionResult): DidResolutionResult {
+    const id = result.didDocument?.id
+    if (!id || id === parsed.did || getAlternativeDidsForNumAlgo4Did(id)?.includes(parsed.did)) return result
+
+    return {
+      didDocument: null,
+      didDocumentMetadata: {},
+      didResolutionMetadata: {
+        error: 'invalidDidDocument',
+        message: `DID document id '${id}' does not match the resolved did '${parsed.did}'`,
+      },
+    }
+  }
+
+  private getCacheKeyAndScope(parsed: ParsedDid): { cacheKey: string; cacheScope: 'context' | 'global' } {
+    return {
+      cacheKey: `did:resolver:${parsed.did}`,
+      cacheScope: this.didsModuleConfig.publicDidMethods.includes(parsed.method) ? 'global' : 'context',
+    }
   }
 
   private findResolver(parsed: ParsedDid): DidResolver | null {

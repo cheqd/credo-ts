@@ -2,14 +2,13 @@ import { Kms, TypedArrayEncoder } from '@credo-ts/core'
 import { CredentialDefinitionRequest, GetNymRequest, NymRequest, SchemaRequest } from '@hyperledger/indy-vdr-shared'
 import { transformPrivateKeyToPrivateJwk } from '../../askar/src'
 import { genesisTransactions, getAgentConfig, getAgentContext } from '../../core/tests/helpers'
-import testLogger from '../../core/tests/logger'
 import { NodeInMemoryKeyManagementStorage, NodeKeyManagementService } from '../../node/src'
 import { IndyVdrPool } from '../src/pool'
 import { IndyVdrPoolService } from '../src/pool/IndyVdrPoolService'
 import { indyDidFromPublicKeyBase58 } from '../src/utils/did'
 import { indyVdrModuleConfig } from './helpers'
 
-const indyVdrPoolService = new IndyVdrPoolService(testLogger, indyVdrModuleConfig)
+const indyVdrPoolService = new IndyVdrPoolService(indyVdrModuleConfig)
 const agentConfig = getAgentConfig('IndyVdrPoolService')
 const agentContext = getAgentContext({
   agentConfig,
@@ -30,7 +29,7 @@ describe('IndyVdrPoolService', () => {
   beforeAll(async () => {
     const createdKey = await kms.importKey({
       privateJwk: transformPrivateKeyToPrivateJwk({
-        privateKey: TypedArrayEncoder.fromString('000000000000000000000000Trustee9'),
+        privateKey: TypedArrayEncoder.fromUtf8String('000000000000000000000000Trustee9'),
         type: {
           kty: 'OKP',
           crv: 'Ed25519',

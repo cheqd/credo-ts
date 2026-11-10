@@ -2,6 +2,7 @@ import { JSONPath } from '@astronautlabs/jsonpath'
 import { CredoError } from '../../../error'
 import type { SingleOrArray } from '../../../types'
 import { MdocDeviceResponse } from '../../mdoc'
+import type { SdJwtVc } from '../../sd-jwt-vc'
 import type { W3cJsonLdVerifiableCredential, W3cJwtVerifiableCredential } from '../../vc'
 import {
   ClaimFormat,
@@ -9,6 +10,7 @@ import {
   W3cJwtVerifiablePresentation,
   W3cV2JwtVerifiablePresentation,
 } from '../../vc'
+import { W3cV2DataIntegrityVerifiablePresentation } from '../../vc/data-integrity'
 import { W3cV2SdJwtVerifiablePresentation } from '../../vc/sd-jwt-vc'
 import type {
   DifPresentationExchangeDefinition,
@@ -41,7 +43,7 @@ export function extractPresentationsWithDescriptorsFromSubmission(
     }
 
     if (presentation instanceof MdocDeviceResponse) {
-      const document = presentation.documents.find((document) => document.docType === descriptor.id)
+      const document = presentation.deviceResponse.documents?.find((document) => document.docType === descriptor.id)
       if (!document) {
         throw new Error(
           `Unable to extract mdoc document with doctype '${descriptor.id}' from mdoc device response for submission '${submission.id}'.`
@@ -88,7 +90,8 @@ export function extractPresentationsWithDescriptorsFromSubmission(
     }
     if (
       presentation instanceof W3cV2JwtVerifiablePresentation ||
-      presentation instanceof W3cV2SdJwtVerifiablePresentation
+      presentation instanceof W3cV2SdJwtVerifiablePresentation ||
+      presentation instanceof W3cV2DataIntegrityVerifiablePresentation
     ) {
       throw new CredoError(
         `Presentation format '${presentation.claimFormat}' is not supported with DIF Presentation Exchange`
@@ -98,7 +101,7 @@ export function extractPresentationsWithDescriptorsFromSubmission(
       claimFormat: ClaimFormat.SdJwtDc,
       descriptor,
       presentation,
-      credential: presentation,
+      credential: presentation as SdJwtVc,
       inputDescriptor,
     } as const
   })

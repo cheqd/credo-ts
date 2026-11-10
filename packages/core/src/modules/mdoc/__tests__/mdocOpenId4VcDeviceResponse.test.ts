@@ -1,8 +1,10 @@
-import { cborEncode, parseDeviceResponse } from '@animo-id/mdoc'
+import { DeviceResponse } from '@owf/mdoc'
+import type { InputDescriptorV2 } from '@sphereon/pex-models'
 import { getAgentOptions } from '../../../../tests'
 import { Agent } from '../../../agent/Agent'
 import { TypedArrayEncoder } from '../../../utils'
 import type { DifPresentationExchangeDefinition } from '../../dif-presentation-exchange'
+import { assertMdocInputDescriptor, inputDescriptorToDocumentRequest } from '../../dif-presentation-exchange/utils/mdoc'
 import { PublicJwk } from '../../kms'
 import { X509Certificate } from '../../x509'
 import { Mdoc } from '../Mdoc'
@@ -116,6 +118,7 @@ describe('mdoc device-response openid4vp test', () => {
   let deviceResponse: string
   let mdoc: Mdoc
   let parsedDocument: Mdoc
+  let parsedDeviceResponse: MdocDeviceResponse
 
   const verifierGeneratedNonce = 'abcdefg'
   const mdocGeneratedNonce = '123456'
@@ -148,9 +151,11 @@ describe('mdoc device-response openid4vp test', () => {
         docType: 'org.iso.18013.5.1.mDL',
         validityInfo: {
           signed: new Date('2023-10-24'),
+          validFrom: new Date('2023-10-24'),
           validUntil: new Date('2050-10-24'),
         },
         holderKey: deviceKeyPublicJwk,
+        keyAuthorizations: { namespaces: ['com.foobar-device'] },
         issuerCertificate,
         namespaces: {
           'org.iso.18013.5.1': {
@@ -189,9 +194,17 @@ describe('mdoc device-response openid4vp test', () => {
 
       //  This is the Device side
       {
-        const result = await MdocDeviceResponse.createPresentationDefinitionDeviceResponse(agent.context, {
+        const result = await MdocDeviceResponse.createDeviceResponse(agent.context, {
           mdocs: [mdoc],
-          presentationDefinition: PRESENTATION_DEFINITION_1,
+          documentRequests: (PRESENTATION_DEFINITION_1.input_descriptors as InputDescriptorV2[])
+            .filter((id) => Object.keys(id.format ?? {}).includes('mso_mdoc'))
+            .map(assertMdocInputDescriptor)
+            .map(inputDescriptorToDocumentRequest)
+            // Device signed values are only disclosed when requested
+            .map((documentRequest) => ({
+              ...documentRequest,
+              nameSpaces: { ...documentRequest.nameSpaces, 'com.foobar-device': { test: false } },
+            })),
           sessionTranscriptOptions: {
             type: 'openId4VpDraft18',
             clientId,
@@ -203,36 +216,49 @@ describe('mdoc device-response openid4vp test', () => {
             'com.foobar-device': { test: 1234 },
           },
         })
-        deviceResponse = result.deviceResponseBase64Url
+        deviceResponse = result.encoded
+        parsedDeviceResponse = MdocDeviceResponse.fromBase64Url(deviceResponse)
 
-        const parsed = parseDeviceResponse(TypedArrayEncoder.fromBase64(deviceResponse))
+        const parsed = DeviceResponse.fromEncodedForOid4Vp(deviceResponse)
         expect(parsed.documents).toHaveLength(1)
-
-        const prepared = parsed.documents[0].prepare()
-        const docType = prepared.get('docType') as string
-        const issuerSigned = cborEncode(prepared.get('issuerSigned'))
-        const deviceSigned = cborEncode(prepared.get('deviceSigned'))
-        parsedDocument = Mdoc.fromDeviceSignedDocument(
-          TypedArrayEncoder.toBase64URL(issuerSigned),
-          TypedArrayEncoder.toBase64URL(deviceSigned),
-          docType
-        )
+        parsedDocument = Mdoc.fromBase64Url(parsed.documents?.[0].issuerSigned.encodedForOid4Vci as string)
       }
     })
 
     it('should be verifiable', async () => {
       const mdocDeviceResponse = MdocDeviceResponse.fromBase64Url(deviceResponse)
-      const res = await mdocDeviceResponse.verify(agent.context, {
-        trustedCertificates: [ISSUER_CERTIFICATE_P256],
-        sessionTranscriptOptions: {
-          type: 'openId4VpDraft18',
-          clientId,
-          responseUri,
-          verifierGeneratedNonce,
-          mdocGeneratedNonce,
-        },
+      await expect(
+        mdocDeviceResponse.verify(agent.context, {
+          trustedCertificates: [ISSUER_CERTIFICATE_P256],
+          sessionTranscriptOptions: {
+            type: 'openId4VpDraft18',
+            clientId,
+            responseUri,
+            verifierGeneratedNonce,
+            mdocGeneratedNonce,
+          },
+        })
+      ).resolves.toEqual({
+        documents: [{ documentIndex: 0, mdoc: expect.any(Mdoc), trustedIssuanceChain: expect.any(Array) }],
       })
-      expect(res).toHaveLength(1)
+    })
+
+    it('should be verifiable with the mdoc-generated nonce provided as raw utf-8 bytes', async () => {
+      const mdocDeviceResponse = MdocDeviceResponse.fromBase64Url(deviceResponse)
+      await expect(
+        mdocDeviceResponse.verify(agent.context, {
+          trustedCertificates: [ISSUER_CERTIFICATE_P256],
+          sessionTranscriptOptions: {
+            type: 'openId4VpDraft18',
+            clientId,
+            responseUri,
+            verifierGeneratedNonce,
+            mdocGeneratedNonce: TypedArrayEncoder.fromUtf8String(mdocGeneratedNonce),
+          },
+        })
+      ).resolves.toEqual({
+        documents: [{ documentIndex: 0, mdoc: expect.any(Mdoc), trustedIssuanceChain: expect.any(Array) }],
+      })
     })
 
     describe('should not be verifiable', () => {
@@ -261,9 +287,7 @@ describe('mdoc device-response openid4vp test', () => {
             })
             throw new Error('should not validate with different transcripts')
           } catch (error) {
-            expect((error as Error).message).toMatch(
-              'Unable to verify deviceAuth signature (ECDSA/EdDSA): Device signature must be valid'
-            )
+            expect((error as Error).message).toMatch('Mdoc with doctype org.iso.18013.5.1.mDL is not valid')
           }
         })
       }
@@ -277,11 +301,12 @@ describe('mdoc device-response openid4vp test', () => {
     })
 
     it('should contain the device namespaces', () => {
-      expect(parsedDocument.deviceSignedNamespaces).toEqual({
-        'com.foobar-device': {
-          test: 1234,
-        },
-      })
+      expect(
+        Array.from(
+          parsedDeviceResponse.deviceResponse.documents?.[0].deviceSigned.deviceNamespaces.deviceNamespaces.entries() ??
+            []
+        ).map(([namespace, value]) => [namespace, Array.from(value.deviceSignedItems.entries())])
+      ).toEqual([['com.foobar-device', [['test', 1234]]]])
     })
   })
 
@@ -322,6 +347,7 @@ describe('mdoc device-response openid4vp test', () => {
           validUntil: new Date('2050-10-24'),
         },
         holderKey: PublicJwk.fromPublicJwk(holderKey.publicJwk),
+        keyAuthorizations: { namespaces: ['com.foobar-device'] },
         issuerCertificate,
         namespaces: {
           'org.iso.18013.5.1': {
@@ -360,9 +386,17 @@ describe('mdoc device-response openid4vp test', () => {
 
       //  This is the Device side
 
-      const result = await MdocDeviceResponse.createPresentationDefinitionDeviceResponse(agent.context, {
+      const result = await MdocDeviceResponse.createDeviceResponse(agent.context, {
         mdocs: [mdoc],
-        presentationDefinition: PRESENTATION_DEFINITION_1,
+        documentRequests: (PRESENTATION_DEFINITION_1.input_descriptors as InputDescriptorV2[])
+          .filter((id) => Object.keys(id.format ?? {}).includes('mso_mdoc'))
+          .map(assertMdocInputDescriptor)
+          .map(inputDescriptorToDocumentRequest)
+          // Device signed values are only disclosed when requested
+          .map((documentRequest) => ({
+            ...documentRequest,
+            nameSpaces: { ...documentRequest.nameSpaces, 'com.foobar-device': { test: false } },
+          })),
         sessionTranscriptOptions: {
           type: 'openId4VpDraft18',
           clientId,
@@ -374,23 +408,17 @@ describe('mdoc device-response openid4vp test', () => {
           'com.foobar-device': { test: 1234 },
         },
       })
-      deviceResponse = result.deviceResponseBase64Url
+      deviceResponse = result.encoded
+      parsedDeviceResponse = MdocDeviceResponse.fromBase64Url(deviceResponse)
 
-      const parsed = parseDeviceResponse(TypedArrayEncoder.fromBase64(deviceResponse))
-      expect(parsed.documents).toHaveLength(1)
+      expect(parsedDeviceResponse.deviceResponse.documents).toHaveLength(1)
 
-      const prepared = parsed.documents[0].prepare()
-      const docType = prepared.get('docType') as string
-      const issuerSigned = cborEncode(prepared.get('issuerSigned'))
-      const deviceSigned = cborEncode(prepared.get('deviceSigned'))
-      parsedDocument = Mdoc.fromDeviceSignedDocument(
-        TypedArrayEncoder.toBase64URL(issuerSigned),
-        TypedArrayEncoder.toBase64URL(deviceSigned),
-        docType
+      parsedDocument = Mdoc.fromBase64Url(
+        parsedDeviceResponse.deviceResponse.documents?.[0].issuerSigned.encodedForOid4Vci as string
       )
 
-      expect(parsed.documents[0].issuerSigned.issuerAuth.algName).toBe('EdDSA')
-      await MdocDeviceResponse.fromBase64Url(result.deviceResponseBase64Url).verify(agent.context, {
+      expect(parsedDocument.alg).toBe('EdDSA')
+      await MdocDeviceResponse.fromBase64Url(result.encoded).verify(agent.context, {
         trustedCertificates: [issuerCertificate.toString('pem')],
         sessionTranscriptOptions: {
           type: 'openId4VpDraft18',

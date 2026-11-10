@@ -2,7 +2,7 @@ import { AskarModule } from '@credo-ts/askar'
 import { Agent, ConsoleLogger, CredoError, LogLevel } from '@credo-ts/core'
 import { DidCommHttpOutboundTransport, DidCommModule, DidCommWsOutboundTransport } from '@credo-ts/didcomm'
 import { agentDependencies } from '@credo-ts/node'
-import { askar } from '@openwallet-foundation/askar-nodejs'
+import { NativeAskar } from '@openwallet-foundation/askar-nodejs'
 import { filter, first, firstValueFrom, map, ReplaySubject, timeout } from 'rxjs'
 import type { DummyRecord, DummyStateChangedEvent } from './dummy'
 
@@ -17,11 +17,11 @@ const run = async () => {
   // Setup the agent
   const agent = new Agent({
     config: {
-      logger: new ConsoleLogger(LogLevel.info),
+      logger: new ConsoleLogger(LogLevel.Info),
     },
     modules: {
       askar: new AskarModule({
-        askar,
+        askar: NativeAskar,
         store: {
           id: 'requester',
           key: 'requester',

@@ -1,6 +1,7 @@
 import type {
   AnonCredsCredentialDefinition,
   AnonCredsProofRequest,
+  AnonCredsRevocationRegistryDefinition,
   AnonCredsRevocationStatusList,
   AnonCredsSchema,
   AnonCredsSelectedCredentials,
@@ -15,16 +16,17 @@ import type { DidRepository, W3cJsonCredential } from '@credo-ts/core'
 import {
   DidResolverService,
   DidsModuleConfig,
+  defaultDocumentLoader,
   InjectionSymbols,
-  SignatureSuiteToken,
+  JsonLdModuleConfig,
+  SignatureSuiteRegistry,
   W3cCredentialRecord,
   W3cCredentialRepository,
   W3cCredentialSubject,
-  W3cCredentialsModuleConfig,
   W3cJsonLdVerifiableCredential,
   w3cDate,
 } from '@credo-ts/core'
-import { anoncreds } from '@hyperledger/anoncreds-nodejs'
+import { NativeAnoncreds } from '@hyperledger/anoncreds-nodejs'
 import type { JsonObject } from '@hyperledger/anoncreds-shared'
 import { Subject } from 'rxjs'
 import { InMemoryStorageService } from '../../../../../tests/InMemoryStorageService'
@@ -34,6 +36,7 @@ import { AnonCredsLinkSecretRepository } from '../../../../anoncreds/src/reposit
 import { InMemoryAnonCredsRegistry } from '../../../../anoncreds/tests/InMemoryAnonCredsRegistry'
 import { testLogger } from '../../../../core/tests'
 import { agentDependencies, getAgentConfig, getAgentContext, mockFunction } from '../../../../core/tests/helpers'
+import { trackNativeAnonCredsObjects } from '../../../tests/nativeAnonCredsObjects'
 import type { W3cAnonCredsCredentialMetadata } from '../../utils/metadata'
 import { W3cAnonCredsCredentialMetadataKey } from '../../utils/metadata'
 import type { AnonCredsCredentialTags } from '../../utils/w3cAnonCredsUtils'
@@ -88,18 +91,25 @@ const agentContext = getAgentContext({
       AnonCredsModuleConfig,
       new AnonCredsModuleConfig({
         registries: [new InMemoryAnonCredsRegistry({})],
-        anoncreds,
+        anoncreds: NativeAnoncreds,
       }),
     ],
     [InjectionSymbols.Logger, testLogger],
     [DidResolverService, new DidResolverService(testLogger, new DidsModuleConfig(), {} as unknown as DidRepository)],
-    [W3cCredentialsModuleConfig, new W3cCredentialsModuleConfig()],
-    [SignatureSuiteToken, 'default'],
+    [JsonLdModuleConfig, new JsonLdModuleConfig({ documentLoader: defaultDocumentLoader })],
+    [SignatureSuiteRegistry, new SignatureSuiteRegistry()],
   ],
   agentConfig,
 })
 
 describe('AnonCredsRsHolderService', () => {
+  // Credo frees every native AnonCreds object it creates
+  const nativeAnonCredsObjects = trackNativeAnonCredsObjects()
+  afterEach(() => {
+    expect(nativeAnonCredsObjects.takeOpen()).toEqual([])
+  })
+  afterAll(() => nativeAnonCredsObjects.stop())
+
   const getByCredentialIdMock = vi.spyOn(anoncredsCredentialRepositoryMock, 'getByCredentialId')
   const findByIdMock = vi.spyOn(w3cCredentialRepositoryMock, 'findById')
   const findByQueryMock = vi.spyOn(w3cCredentialRepositoryMock, 'findByQuery')
@@ -147,7 +157,7 @@ describe('AnonCredsRsHolderService', () => {
 
   test('createProof', async () => {
     const proofRequest: AnonCredsProofRequest = {
-      nonce: anoncreds.generateNonce(),
+      nonce: NativeAnoncreds.instance.generateNonce(),
       name: 'pres_req_1',
       version: '0.1',
       requested_attributes: {
@@ -217,7 +227,6 @@ describe('AnonCredsRsHolderService', () => {
       keyCorrectnessProof: personKeyCorrectnessProof,
       linkSecret,
       linkSecretId: 'linkSecretId',
-      revocationRegistryDefinitionId: 'personrevregid:uri',
     })
     const personRecord = await storeCredential(agentContext, personCredential, {
       credentialDefinitionId: 'personcreddef:uri',
@@ -243,7 +252,6 @@ describe('AnonCredsRsHolderService', () => {
       keyCorrectnessProof: phoneKeyCorrectnessProof,
       linkSecret,
       linkSecretId: 'linkSecretId',
-      revocationRegistryDefinitionId: 'phonerevregid:uri',
     })
 
     const phoneRecord = await storeCredential(agentContext, phoneCredential, {
@@ -286,12 +294,12 @@ describe('AnonCredsRsHolderService', () => {
     const revocationRegistries = {
       'personrevregid:uri': {
         tailsFilePath: personTailsPath,
-        definition: JSON.parse(anoncreds.getJson({ objectHandle: personRevRegDef })),
+        definition: personRevRegDef as unknown as AnonCredsRevocationRegistryDefinition,
         revocationStatusLists: { '1': {} as AnonCredsRevocationStatusList },
       },
       'phonerevregid:uri': {
         tailsFilePath: phoneTailsPath,
-        definition: JSON.parse(anoncreds.getJson({ objectHandle: phoneRevRegDef })),
+        definition: phoneRevRegDef as unknown as AnonCredsRevocationRegistryDefinition,
         revocationStatusLists: { '1': {} as AnonCredsRevocationStatusList },
       },
     }
@@ -324,7 +332,7 @@ describe('AnonCredsRsHolderService', () => {
     const anonCredsFindByQueryMock = vi.spyOn(anoncredsCredentialRepositoryMock, 'findByQuery')
 
     const proofRequest: AnonCredsProofRequest = {
-      nonce: anoncreds.generateNonce(),
+      nonce: NativeAnoncreds.instance.generateNonce(),
       name: 'pres_req_1',
       version: '0.1',
       requested_attributes: {
@@ -633,7 +641,6 @@ describe('AnonCredsRsHolderService', () => {
       keyCorrectnessProof,
       linkSecret,
       linkSecretId: 'linkSecretId',
-      revocationRegistryDefinitionId: 'did:indy:sovrin:test:12345/anoncreds/v0/REV_REG_DEF/420/someTag/anotherTag',
     })
 
     await storeCredential(agentContext, credential, {

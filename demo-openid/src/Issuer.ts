@@ -31,7 +31,7 @@ import {
   OpenId4VcVerifierRecord,
   type VerifiedOpenId4VcCredentialHolderBinding,
 } from '@credo-ts/openid4vc'
-import { askar } from '@openwallet-foundation/askar-nodejs'
+import { NativeAskar } from '@openwallet-foundation/askar-nodejs'
 import { decodeJwt } from 'jose'
 import { BaseAgent } from './BaseAgent'
 import { Output } from './OutputClass'
@@ -42,6 +42,16 @@ const ISSUER_HOST = process.env.ISSUER_HOST ?? 'http://localhost:2000'
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 export const GOOGLE_ENABLED = GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET
+
+const getNextMonth = () => {
+  const now = new Date()
+  let nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  if (now.getMonth() === 11) {
+    nextMonth = new Date(now.getFullYear() + 1, 0, 1)
+  }
+
+  return nextMonth
+}
 
 export const credentialConfigurationsSupported = {
   PresentationAuthorization: {
@@ -224,6 +234,7 @@ function getCredentialRequestToCredentialMapper({
         type: 'credentials',
         format: ClaimFormat.MsoMdoc,
         credentials: holderBinding.keys.map((binding) => ({
+          validityInfo: { validUntil: getNextMonth() },
           issuerCertificate,
           holderKey: binding.jwk,
           namespaces: {
@@ -253,7 +264,7 @@ export class Issuer extends BaseAgent<{
       port,
       name,
       modules: (app) => ({
-        askar: new AskarModule({ askar, store: { id: name, key: name } }),
+        askar: new AskarModule({ askar: NativeAskar, store: { id: name, key: name } }),
         kms: new Kms.KeyManagementModule({
           backends: [new NodeKeyManagementService(new NodeInMemoryKeyManagementStorage())],
         }),
@@ -307,7 +318,7 @@ export class Issuer extends BaseAgent<{
 
     const importedKey = await issuer.agent.kms.importKey({
       privateJwk: transformSeedToPrivateJwk({
-        seed: TypedArrayEncoder.fromString('e5f18b10cd15cdb76818bc6ae8b71eb475e6eac76875ed085d3962239bbcf42f'),
+        seed: TypedArrayEncoder.fromUtf8String('e5f18b10cd15cdb76818bc6ae8b71eb475e6eac76875ed085d3962239bbcf42f'),
         type: {
           crv: 'P-256',
           kty: 'EC',

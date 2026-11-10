@@ -1,10 +1,12 @@
 import type { AgentContext, Constructable, SdJwtVc } from '@credo-ts/core'
 import {
   Agent,
+  CredoError,
   DidKey,
   DidsModule,
   getDomainFromUrl,
   Hasher,
+  JsonEncoder,
   JwsService,
   JwtPayload,
   KeyDidRegistrar,
@@ -13,19 +15,24 @@ import {
   TypedArrayEncoder,
   X509Certificate,
   X509ModuleConfig,
+  X509Service,
 } from '@credo-ts/core'
-import { Jwt, SDJwt } from '@sd-jwt/core'
-import { createHeaderAndPayload, StatusList } from '@sd-jwt/jwt-status-list'
-import { SDJWTException } from '@sd-jwt/utils'
+import { createHeaderAndPayload, SLException, StatusList } from '@owf/token-status-list'
+import { decodeSdJwtSync, getClaimsSync, Jwt, SDJwt } from '@sd-jwt/core'
 import { randomUUID } from 'crypto'
 import nock from 'nock'
-import { vi } from 'vitest'
+import { type Mock, vi } from 'vitest'
 import { transformSeedToPrivateJwk } from '../../../../../askar/src'
 import { getAgentOptions, mockProperty } from '../../../../tests'
 import { PublicJwk } from '../../kms'
+import { applyDisclosuresForPaths, buildPresentationFrameForPaths } from '../disclosureFrame'
 import { SdJwtVcRecord, SdJwtVcRepository } from '../repository'
-import { type CustomTypeMetadataResolver, SdJwtVcModuleConfig } from '../SdJwtVcModuleConfig'
-import type { SdJwtVcHeader, SdJwtVcPayload } from '../SdJwtVcOptions'
+import {
+  type CustomStatusListFetcher,
+  type CustomTypeMetadataResolver,
+  SdJwtVcModuleConfig,
+} from '../SdJwtVcModuleConfig'
+import type { IDisclosureFrame, SdJwtVcHeader, SdJwtVcPayload } from '../SdJwtVcOptions'
 import { SdJwtVcService } from '../SdJwtVcService'
 import {
   complexSdJwtVc,
@@ -77,9 +84,14 @@ const agent = new Agent(
   )
 )
 
-agent.kms.randomBytes = vi.fn(function () {
-  return TypedArrayEncoder.fromString('salt')
-})
+const staticSalt = () => TypedArrayEncoder.fromUtf8String('salt')
+agent.kms.randomBytes = vi.fn(staticSalt)
+
+// Disclosure salts must be unique within a single sd-jwt, so tests issuing multiple disclosures need unique salts
+const mockUniqueSalts = () => {
+  let counter = 0
+  vi.mocked(agent.kms.randomBytes).mockImplementation(() => TypedArrayEncoder.fromUtf8String(`salt${counter++}`))
+}
 Date.prototype.getTime = vi.fn(function () {
   return 1698151532000
 })
@@ -94,7 +106,9 @@ const generateStatusList = async (
   key: PublicJwk,
   issuerDidUrl: string,
   length: number,
-  revokedIndexes: number[]
+  revokedIndexes: number[],
+  // `createHeaderAndPayload` always sets the `typ`, so a wrong `typ` is set on the JWS header instead
+  overrides: { typ?: string; sub?: string } = {}
 ): Promise<string> => {
   const statusList = new StatusList(
     Array.from({ length }, (_, i) => (revokedIndexes.includes(i) ? 1 : 0)),
@@ -106,7 +120,7 @@ const generateStatusList = async (
     statusList,
     {
       iss: did,
-      sub: 'https://example.com/status/1',
+      sub: overrides.sub ?? 'https://example.com/status-list',
       iat: Date.now() / 1000,
     },
     {
@@ -123,6 +137,45 @@ const generateStatusList = async (
     protectedHeaderOptions: {
       ...header,
       alg: 'EdDSA',
+      ...(overrides.typ ? { typ: overrides.typ } : {}),
+    },
+  })
+}
+
+// Generates a status list JWT signed with an `x5c` header (x509), instead of a `kid` (did).
+const generateX509StatusList = async (
+  agentContext: AgentContext,
+  key: PublicJwk,
+  certificate: X509Certificate,
+  length: number,
+  revokedIndexes: number[]
+): Promise<string> => {
+  const statusList = new StatusList(
+    Array.from({ length }, (_, i) => (revokedIndexes.includes(i) ? 1 : 0)),
+    1
+  )
+
+  const { payload } = createHeaderAndPayload(
+    statusList,
+    {
+      iss: 'https://example.com',
+      sub: 'https://example.com/status-list',
+      iat: Date.now() / 1000,
+    },
+    {
+      alg: 'ES256',
+      typ: 'statuslist+jwt',
+    }
+  )
+
+  const jwsService = agentContext.dependencyManager.resolve(JwsService)
+  return jwsService.createJwsCompact(agentContext, {
+    keyId: key.keyId,
+    payload: JwtPayload.fromJson(payload),
+    protectedHeaderOptions: {
+      alg: 'ES256',
+      typ: 'statuslist+jwt',
+      x5c: [certificate.toString('base64')],
     },
   })
 }
@@ -134,6 +187,12 @@ describe('SdJwtVcService', () => {
   let holderKey: PublicJwk
   let sdJwtVcService: SdJwtVcService
 
+  const mockStatusList = (statusList: string) =>
+    nock('https://example.com')
+      .get('/status-list')
+      .matchHeader('accept', 'application/statuslist+jwt')
+      .reply(200, statusList, { 'Content-Type': 'application/statuslist+jwt' })
+
   afterEach(() => {
     nock.cleanAll()
   })
@@ -142,7 +201,7 @@ describe('SdJwtVcService', () => {
     await agent.initialize()
 
     const issuerPrivateJwk = transformSeedToPrivateJwk({
-      seed: TypedArrayEncoder.fromString('00000000000000000000000000000000'),
+      seed: TypedArrayEncoder.fromUtf8String('00000000000000000000000000000000'),
       type: {
         crv: 'Ed25519',
         kty: 'OKP',
@@ -173,7 +232,7 @@ describe('SdJwtVcService', () => {
     simpleX509Certificate.keyId = issuerKey.keyId
 
     const holderPrivateJwk = transformSeedToPrivateJwk({
-      seed: TypedArrayEncoder.fromString('00000000000000000000000000000001'),
+      seed: TypedArrayEncoder.fromUtf8String('00000000000000000000000000000001'),
       type: {
         crv: 'Ed25519',
         kty: 'OKP',
@@ -210,24 +269,28 @@ describe('SdJwtVcService', () => {
   })
 
   describe('SdJwtVcService.sign', () => {
-    test('Sign (x509) sd-jwt-vc with an invalid certificate issuer should fail', async () => {
-      await expect(
-        sdJwtVcService.sign(agent.context, {
-          payload: {
-            claim: 'some-claim',
-            vct: 'IdentityCredential',
-          },
-          holder: {
-            method: 'jwk',
-            jwk: holderKey,
-          },
-          issuer: {
-            method: 'x5c',
-            x5c: [simpleX509Certificate],
-            issuer: 'some-issuer',
-          },
-        })
-      ).rejects.toThrow()
+    afterEach(() => {
+      vi.mocked(agent.kms.randomBytes).mockImplementation(staticSalt)
+    })
+
+    test('Sign (x509) sd-jwt-vc with an issuer claim that does not match the certificate', async () => {
+      const { compact } = await sdJwtVcService.sign(agent.context, {
+        payload: {
+          claim: 'some-claim',
+          vct: 'IdentityCredential',
+        },
+        holder: {
+          method: 'jwk',
+          jwk: holderKey,
+        },
+        issuer: {
+          method: 'x5c',
+          x5c: [simpleX509Certificate],
+          issuer: 'some-issuer',
+        },
+      })
+
+      expect(sdJwtVcService.fromCompact(compact).payload.iss).toEqual('some-issuer')
     })
 
     test('Sign (x509) sd-jwt-vc from a basic payload without disclosures', async () => {
@@ -235,6 +298,7 @@ describe('SdJwtVcService', () => {
         payload: {
           claim: 'some-claim',
           vct: 'IdentityCredential',
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -271,6 +335,7 @@ describe('SdJwtVcService', () => {
         payload: {
           claim: 'some-claim',
           vct: 'IdentityCredential',
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -300,11 +365,64 @@ describe('SdJwtVcService', () => {
       })
     })
 
+    test('Sign sd-jwt-vc with iat explicitly set to null should not include iat in the issued credential', async () => {
+      const { compact } = await sdJwtVcService.sign(agent.context, {
+        payload: {
+          claim: 'some-claim',
+          vct: 'IdentityCredential',
+          iat: null,
+        },
+        holder: {
+          method: 'jwk',
+          jwk: holderKey,
+        },
+        issuer: {
+          method: 'did',
+          didUrl: issuerDidUrl,
+        },
+      })
+
+      const sdJwtVc = sdJwtVcService.fromCompact(compact)
+
+      expect(sdJwtVc.payload).not.toHaveProperty('iat')
+      expect(sdJwtVc.prettyClaims).not.toHaveProperty('iat')
+      expect(sdJwtVc.prettyClaims).toEqual({
+        claim: 'some-claim',
+        vct: 'IdentityCredential',
+        iss: parseDid(issuerDidUrl).did,
+        cnf: { jwk: holderKey.toJson() },
+      })
+    })
+
+    test('Sign sd-jwt-vc with iat in payload should preserve the provided iat value', async () => {
+      const customIat = 1700000000
+
+      const { compact } = await sdJwtVcService.sign(agent.context, {
+        payload: {
+          claim: 'some-claim',
+          vct: 'IdentityCredential',
+          iat: customIat,
+        },
+        holder: {
+          method: 'jwk',
+          jwk: holderKey,
+        },
+        issuer: {
+          method: 'did',
+          didUrl: issuerDidUrl,
+        },
+      })
+
+      const sdJwtVc = sdJwtVcService.fromCompact(compact)
+      expect(sdJwtVc.payload.iat).toEqual(customIat)
+    })
+
     test('Sign sd-jwt-vc from a basic payload without disclosures', async () => {
       const { compact } = await sdJwtVcService.sign(agent.context, {
         payload: {
           claim: 'some-claim',
           vct: 'IdentityCredential',
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -343,6 +461,7 @@ describe('SdJwtVcService', () => {
         payload: {
           claim: 'some-claim',
           vct: 'IdentityCredential',
+          iat: Math.floor(Date.now() / 1000),
         },
         headerType: 'vc+sd-jwt',
         issuer: {
@@ -376,6 +495,7 @@ describe('SdJwtVcService', () => {
           vct: 'IdentityCredential',
           value: false,
           discloseableValue: false,
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -410,7 +530,7 @@ describe('SdJwtVcService', () => {
 
     test('Create sd-jwt-vc from a basic payload with a disclosure', async () => {
       const { compact, header, prettyClaims, payload } = await sdJwtVcService.sign(agent.context, {
-        payload: { claim: 'some-claim', vct: 'IdentityCredential' },
+        payload: { claim: 'some-claim', vct: 'IdentityCredential', iat: Math.floor(Date.now() / 1000) },
         disclosureFrame: { _sd: ['claim'] },
         holder: {
           method: 'jwk',
@@ -453,8 +573,60 @@ describe('SdJwtVcService', () => {
       })
     })
 
+    test('Create sd-jwt-vc with a hashing algorithm other than sha-256', async () => {
+      const iat = 1698151532
+      const { compact, payload, prettyClaims } = await sdJwtVcService.sign(agent.context, {
+        payload: { claim: 'some-claim', vct: 'IdentityCredential', iat },
+        disclosureFrame: { _sd: ['claim'] },
+        holder: {
+          method: 'jwk',
+          jwk: holderKey,
+        },
+        issuer: {
+          method: 'did',
+          didUrl: issuerDidUrl,
+        },
+        hashingAlgorithm: 'sha-512',
+      })
+
+      const [, encodedDisclosure] = compact.split('~')
+
+      expect(payload).toEqual({
+        vct: 'IdentityCredential',
+        iat,
+        iss: issuerDidUrl.split('#')[0],
+        _sd: [TypedArrayEncoder.toBase64Url(Hasher.hash(encodedDisclosure, 'sha-512'))],
+        _sd_alg: 'sha-512',
+        cnf: {
+          jwk: holderKey.toJson(),
+        },
+      })
+
+      // The digests must be resolvable using the algorithm from `_sd_alg`
+      expect(prettyClaims.claim).toStrictEqual('some-claim')
+      expect(sdJwtVcService.fromCompact(compact).prettyClaims.claim).toStrictEqual('some-claim')
+    })
+
+    test('Create sd-jwt-vc with sha-1 as hashing algorithm and fails', async () => {
+      await expect(
+        sdJwtVcService.sign(agent.context, {
+          payload: { claim: 'some-claim', vct: 'IdentityCredential' },
+          disclosureFrame: { _sd: ['claim'] },
+          issuer: {
+            method: 'did',
+            didUrl: issuerDidUrl,
+          },
+          // `sha-1` is excluded on a type level, but JavaScript callers can still provide it
+          hashingAlgorithm: 'sha-1' as never,
+        })
+      ).rejects.toThrow(
+        "Unsupported hashing algorithm 'sha-1' for the disclosure digests of an SD-JWT. Supported hashing algorithms are sha-256, sha-384, sha-512"
+      )
+    })
+
     test('Create sd-jwt-vc from a basic payload with multiple (nested) disclosure', async () => {
-      const { compact, header, payload, prettyClaims } = await sdJwtVcService.sign(agent.context, {
+      mockUniqueSalts()
+      const { header, payload, prettyClaims } = await sdJwtVcService.sign(agent.context, {
         disclosureFrame: {
           _sd: ['is_over_65', 'is_over_21', 'is_over_18', 'birthdate', 'email', 'given_name'],
           address: {
@@ -477,6 +649,7 @@ describe('SdJwtVcService', () => {
           is_over_18: true,
           is_over_21: true,
           is_over_65: true,
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -489,8 +662,6 @@ describe('SdJwtVcService', () => {
         headerType: 'vc+sd-jwt',
       })
 
-      expect(compact).toStrictEqual(complexSdJwtVc)
-
       expect(header).toEqual({
         alg: 'EdDSA',
         typ: 'vc+sd-jwt',
@@ -501,7 +672,7 @@ describe('SdJwtVcService', () => {
         vct: 'IdentityCredential',
         iat: Math.floor(Date.now() / 1000),
         address: {
-          _sd: ['8Kl-6KGl7JjFrlN0ZKDPKzeRfo0oJ5Tv0F6cXgpmOCY', 'cxH6g51BOh8vDiQXW88Kq896DEVLZZ4mbuLO6z__5ds'],
+          _sd: ['-5id9AETSlfSgueABbi7AxNO_jMnixiMAK0Y-RFSg1M', 'k1UUbHcbyjSI3lqKAIUXdqgVrVA8W_SlgPmL0DGSvcA'],
           locality: 'Anytown',
           street_address: '123 Main St',
         },
@@ -509,12 +680,12 @@ describe('SdJwtVcService', () => {
         family_name: 'Doe',
         iss: issuerDidUrl.split('#')[0],
         _sd: [
-          '1oLbHVhfmVs2oA3vhFNTXhMw4lGu7ql9dZ0T7p-vWqE',
-          '2xuzS3kUrT6VPJD-MySIkQ47HIB-gcyzF5NDY19cPBw',
-          'hn1gcrO_Q2HskW2Z_nzIrIl6KpgqldvScozutJdbhWM',
-          'jc73t3yBoDs_pDYb03lEYKYvCbtCq9NhuJ6_5A7QNSs',
-          'lKI_sY05pDIs9MDrjCO4v8XoDM963JXxrp9T2FNLyTY',
-          'sl0hkY5LeVwy3rIjNaCl4P4CJ3C3v8Ip-GH2lB9Sd_A',
+          'GRuP81jhLKxUXmVTvd_wNCdbIoc_mxx75PNavKn_XKI',
+          'OXrkrM39EeoiWKZMLCOJxzImLUseRo9kdUgQfeOSnEQ',
+          'YrwUmkjIZz4ZRW1vfPvMunqKaEn-bCpSFEJO-RFwVTs',
+          'gjCZSKGwu9bO3mqnBVfhakDSzFrKhfeWWrhZpcnZLzo',
+          'o1MzUdDNDx5gOAW2FaaVhGald8-3Jb4A6S_FBhzn5zk',
+          'ws7qipcgSSOKTtgPFd7u0fwpOLoK4rIKgGqQoM1ORi0',
         ],
         _sd_alg: 'sha-256',
         cnf: {
@@ -547,6 +718,7 @@ describe('SdJwtVcService', () => {
     })
 
     test('Create sd-jwt-vc from a basic payload with multiple (nested) disclosure where a disclosure contains other disclosures', async () => {
+      mockUniqueSalts()
       const { header, payload, prettyClaims } = await sdJwtVcService.sign(agent.context, {
         disclosureFrame: {
           _sd: ['is_over_65', 'is_over_21', 'is_over_18', 'birthdate', 'email', 'given_name', 'address'],
@@ -570,6 +742,7 @@ describe('SdJwtVcService', () => {
           is_over_18: true,
           is_over_21: true,
           is_over_65: true,
+          iat: Math.floor(Date.now() / 1000),
         },
         holder: {
           method: 'jwk',
@@ -594,13 +767,13 @@ describe('SdJwtVcService', () => {
         family_name: 'Doe',
         iss: issuerDidUrl.split('#')[0],
         _sd: [
-          '1oLbHVhfmVs2oA3vhFNTXhMw4lGu7ql9dZ0T7p-vWqE',
-          '2xuzS3kUrT6VPJD-MySIkQ47HIB-gcyzF5NDY19cPBw',
-          'RDQeb-TXvRaGsX5jV4W2-xAKutsaYZVm8qEvMtP71pc',
-          'hn1gcrO_Q2HskW2Z_nzIrIl6KpgqldvScozutJdbhWM',
-          'jc73t3yBoDs_pDYb03lEYKYvCbtCq9NhuJ6_5A7QNSs',
-          'lKI_sY05pDIs9MDrjCO4v8XoDM963JXxrp9T2FNLyTY',
-          'sl0hkY5LeVwy3rIjNaCl4P4CJ3C3v8Ip-GH2lB9Sd_A',
+          'LYk_sFxcqWbJvdoB_qrXkMRJwu3FafsVe_1RJwz3L-8',
+          'SUShCtoCQQ_YUfyfmhSKwqyQHjqH1X9ZiurnWNvfHI4',
+          'YrwUmkjIZz4ZRW1vfPvMunqKaEn-bCpSFEJO-RFwVTs',
+          'gjCZSKGwu9bO3mqnBVfhakDSzFrKhfeWWrhZpcnZLzo',
+          'hu-enwvnFozp9eH1NTcQnl_g3-gqlmHRBFD8lreDM4s',
+          'keoVRCHpUVfOQEma48MMA0sYCjox8yS2IPEc9MQgzGM',
+          'mvwvkBPwUX28Bm8dwhDHyXT9_SeLsPHPPUFMSTAyRK4',
         ],
         _sd_alg: 'sha-256',
         cnf: {
@@ -840,6 +1013,276 @@ describe('SdJwtVcService', () => {
       })
 
       expect(presentation.compact).toEqual(simpleJwtVc)
+    })
+  })
+
+  describe('applyDisclosuresForPaths', () => {
+    beforeEach(() => {
+      mockUniqueSalts()
+    })
+
+    afterEach(() => {
+      vi.mocked(agent.kms.randomBytes).mockImplementation(staticSalt)
+    })
+
+    const sign = (payload: Record<string, unknown>, disclosureFrame: IDisclosureFrame) =>
+      sdJwtVcService.sign(agent.context, {
+        payload: { vct: 'IdentityCredential', ...payload },
+        disclosureFrame,
+        holder: { method: 'jwk', jwk: holderKey },
+        issuer: { method: 'did', didUrl: issuerDidUrl },
+      })
+
+    test('Returns the SD-JWT VC with only the disclosures for the paths', async () => {
+      const { compact } = await sign(
+        { given_name: 'Erika', family_name: 'Mustermann' },
+        { _sd: ['given_name', 'family_name'] }
+      )
+
+      const sdJwtVc = sdJwtVcService.applyDisclosuresForPaths(compact, [['given_name']])
+
+      expect(sdJwtVc.prettyClaims.given_name).toBe('Erika')
+      expect(sdJwtVc.prettyClaims).not.toHaveProperty('family_name')
+    })
+
+    test('Discloses only the array elements at the given positions', async () => {
+      const { compact } = await sign({ nationalities: ['DE', 'NL', 'FR'] }, { nationalities: { _sd: [0, 1, 2] } })
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['nationalities', 1]])
+
+      expect(prettyClaims.nationalities).toStrictEqual(['NL'])
+      expect(disclosedPaths.filter((path) => path[0] === 'nationalities')).toStrictEqual([['nationalities', 1]])
+    })
+
+    test('Discloses all elements of an array whose elements are not selectively disclosable', async () => {
+      const { compact } = await sign({ nationalities: ['DE', 'NL', 'FR'] }, { _sd: ['nationalities'] })
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['nationalities', 1]])
+
+      expect(prettyClaims.nationalities).toStrictEqual(['DE', 'NL', 'FR'])
+      expect(disclosedPaths.filter((path) => path[0] === 'nationalities')).toStrictEqual([['nationalities']])
+    })
+
+    test('Discloses claims in selectively disclosable array elements', async () => {
+      const { compact } = await sign(
+        {
+          addresses: [
+            { street: 'Main St', city: 'Anytown' },
+            { street: 'Second St', city: 'Othertown' },
+          ],
+        },
+        { addresses: { _sd: [0, 1], 0: { _sd: ['street', 'city'] }, 1: { _sd: ['street', 'city'] } } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['addresses', 1, 'city']])
+
+      expect(prettyClaims.addresses).toStrictEqual([{ city: 'Othertown' }])
+      expect(disclosedPaths.filter((path) => path[0] === 'addresses')).toStrictEqual([['addresses', 1, 'city']])
+    })
+
+    test('Discloses the selectively disclosable claims nested in a requested object', async () => {
+      const { compact } = await sign(
+        {
+          address: {
+            street: 'Main St',
+            city: 'Anytown',
+            country: { code: 'DE', name: 'Germany' },
+          },
+        },
+        { _sd: ['address'], address: { _sd: ['street', 'city', 'country'], country: { _sd: ['code', 'name'] } } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['address']])
+
+      expect(prettyClaims.address).toStrictEqual({
+        street: 'Main St',
+        city: 'Anytown',
+        country: { code: 'DE', name: 'Germany' },
+      })
+      expect(disclosedPaths.filter((path) => path[0] === 'address')).toStrictEqual([['address']])
+    })
+
+    test('Discloses the selectively disclosable claims on the way to a requested claim', async () => {
+      const { compact } = await sign(
+        { address: { street: 'Main St', country: { code: 'DE', name: 'Germany' } } },
+        { _sd: ['address'], address: { _sd: ['street', 'country'], country: { _sd: ['code', 'name'] } } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['address', 'country', 'code']])
+
+      expect(prettyClaims.address).toStrictEqual({ country: { code: 'DE' } })
+      expect(disclosedPaths.filter((path) => path[0] === 'address')).toStrictEqual([['address', 'country', 'code']])
+    })
+
+    test('Has a single path for a requested array with many nested selectively disclosable claims', async () => {
+      const drivingPrivileges = Array.from({ length: 1000 }, (_, index) => ({
+        vehicle_category_code: `C${index}`,
+        codes: [{ code: 'D', sign: '=', value: String(index) }],
+      }))
+
+      const { compact } = await sign(
+        { driving_privileges: drivingPrivileges },
+        {
+          _sd: ['driving_privileges'],
+          driving_privileges: {
+            _sd: drivingPrivileges.map((_, index) => index),
+            ...Object.fromEntries(
+              drivingPrivileges.map((_, index) => [index, { _sd: ['vehicle_category_code', 'codes'] }])
+            ),
+          },
+        }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['driving_privileges']])
+
+      expect(prettyClaims.driving_privileges).toStrictEqual(drivingPrivileges)
+      expect(disclosedPaths.filter((path) => path[0] === 'driving_privileges')).toStrictEqual([['driving_privileges']])
+    })
+
+    test('Builds a presentation frame that discloses everything below a path', async () => {
+      const { compact } = await sign(
+        { address: { street: 'Main St', country: { code: 'DE', name: 'Germany' } } },
+        { _sd: ['address'], address: { _sd: ['street', 'country'], country: { _sd: ['code', 'name'] } } }
+      )
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: compact,
+        presentationFrame: buildPresentationFrameForPaths(compact, [['address']]),
+      })
+
+      expect(sdJwtVcService.fromCompact(presentation).prettyClaims.address).toStrictEqual({
+        street: 'Main St',
+        country: { code: 'DE', name: 'Germany' },
+      })
+    })
+
+    test('Only discloses the requested claims nested in an object', async () => {
+      const { compact } = await sign(
+        { address: { street: 'Main St', city: 'Anytown' } },
+        { _sd: ['address'], address: { _sd: ['street', 'city'] } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['address', 'city']])
+
+      expect(prettyClaims.address).toStrictEqual({ city: 'Anytown' })
+      expect(disclosedPaths.filter((path) => path[0] === 'address')).toStrictEqual([['address', 'city']])
+    })
+
+    test('Includes the path to a disclosed claim with a null value', async () => {
+      const { compact } = await sign({ middle_name: null, given_name: 'Erika' }, { _sd: ['given_name'] })
+
+      const { disclosedPaths } = applyDisclosuresForPaths(compact, [])
+
+      expect(disclosedPaths).toContainEqual(['middle_name'])
+      expect(disclosedPaths).not.toContainEqual(['given_name'])
+    })
+
+    // Builds an SD-JWT that is not signed, for payloads that sign() does not create
+    const buildUnsignedSdJwt = (
+      buildPayload: (digest: (disclosure: unknown[]) => string) => object,
+      alg = 'sha-256'
+    ) => {
+      const toBase64Url = (value: unknown) =>
+        TypedArrayEncoder.toBase64Url(TypedArrayEncoder.fromUtf8String(JSON.stringify(value)))
+
+      const disclosures: string[] = []
+      const payload = buildPayload((disclosure) => {
+        const encoded = toBase64Url(disclosure)
+        disclosures.push(encoded)
+        return TypedArrayEncoder.toBase64Url(Hasher.hash(encoded, alg))
+      })
+
+      return `${toBase64Url({ alg: 'ES256' })}.${toBase64Url(payload)}.signature~${disclosures.map((disclosure) => `${disclosure}~`).join('')}`
+    }
+
+    // The claims of an SD-JWT, which unlike fromCompact() does not need an issuer
+    const getClaims = (compact: string) => {
+      const { jwt, disclosures } = decodeSdJwtSync(compact, Hasher.hash)
+      return getClaimsSync(jwt.payload, disclosures, Hasher.hash) as Record<string, unknown>
+    }
+
+    test('Gives array elements after a decoy digest the position they have in the claims', async () => {
+      const compact = buildUnsignedSdJwt((digest) => ({
+        vct: 'IdentityCredential',
+        nationalities: [
+          { '...': digest(['salt1', 'DE']) },
+          { '...': TypedArrayEncoder.toBase64Url(Hasher.hash('decoy', 'sha-256')) },
+          { '...': digest(['salt2', 'FR']) },
+        ],
+      }))
+      expect(getClaims(compact).nationalities).toStrictEqual(['DE', 'FR'])
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['nationalities', 1]])
+      expect(prettyClaims.nationalities).toStrictEqual(['FR'])
+      expect(disclosedPaths.filter((path) => path[0] === 'nationalities')).toStrictEqual([['nationalities', 1]])
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: compact,
+        presentationFrame: buildPresentationFrameForPaths(compact, disclosedPaths),
+      })
+      expect(getClaims(presentation).nationalities).toStrictEqual(['FR'])
+    })
+
+    test('Does not disclose the claims on the way to a path without a claim', async () => {
+      const { compact } = await sign(
+        { address: { street: 'Main St', city: 'Anytown' } },
+        { _sd: ['address'], address: { _sd: ['street', 'city'] } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['address', 'country']])
+
+      expect(prettyClaims.address).toBeUndefined()
+      expect(disclosedPaths.filter((path) => path[0] === 'address')).toStrictEqual([])
+      expect(buildPresentationFrameForPaths(compact, [['address', 'country']])).not.toHaveProperty('address')
+    })
+
+    test('Only has a single path for a nested claim when everything below it is disclosed', async () => {
+      const { compact } = await sign(
+        { address: { street: 'Main St', country: { code: 'DE', name: 'Germany' } } },
+        { _sd: ['address'], address: { _sd: ['street'], country: { _sd: ['name'] } } }
+      )
+
+      const { prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['address', 'street']])
+
+      expect(prettyClaims.address).toStrictEqual({ street: 'Main St', country: { code: 'DE' } })
+      expect(disclosedPaths.filter((path) => path[0] === 'address')).toStrictEqual([
+        ['address', 'country', 'code'],
+        ['address', 'street'],
+      ])
+    })
+
+    test('Selects an array element only by a number, and a property only by a string', async () => {
+      const { compact } = await sign(
+        { list: ['a', 'b'], object: { '0': 'zero', '1': 'one' } },
+        { list: { _sd: [0, 1] }, object: { _sd: ['0', '1'] } }
+      )
+
+      const claimsFor = (paths: Array<Array<string | number>>) => applyDisclosuresForPaths(compact, paths).prettyClaims
+
+      expect(claimsFor([['list', 0]]).list).toStrictEqual(['a'])
+      expect(claimsFor([['list', '0']]).list).toStrictEqual([])
+      expect(claimsFor([['object', '0']]).object).toStrictEqual({ '0': 'zero' })
+      expect(claimsFor([['object', 0]]).object).toStrictEqual({})
+    })
+
+    test('Uses the hash algorithm of the SD-JWT', () => {
+      const compact = buildUnsignedSdJwt(
+        (digest) => ({
+          vct: 'IdentityCredential',
+          _sd_alg: 'sha-384',
+          _sd: [digest(['salt1', 'given_name', 'Erika']), digest(['salt2', 'family_name', 'Mustermann'])],
+        }),
+        'sha-384'
+      )
+
+      const { compact: disclosed, prettyClaims, disclosedPaths } = applyDisclosuresForPaths(compact, [['given_name']])
+
+      expect(prettyClaims).toStrictEqual({ vct: 'IdentityCredential', given_name: 'Erika' })
+      expect(disclosedPaths).toStrictEqual([['vct'], ['given_name']])
+      expect(getClaims(disclosed)).toStrictEqual({
+        vct: 'IdentityCredential',
+        given_name: 'Erika',
+      })
     })
   })
 
@@ -1083,6 +1526,31 @@ describe('SdJwtVcService', () => {
       })
     })
 
+    test('Verify sd-jwt-vc with status where the status list is larger than the fetch limit and fails', async () => {
+      const sdJwtVcService = agent.dependencyManager.resolve(SdJwtVcService)
+
+      nock('https://example.com')
+        .get('/status-list')
+        .reply(200, 'a'.repeat(agent.config.fetchLimits.maxResponseBytes + 1), {
+          'Content-Type': 'application/statuslist+jwt',
+        })
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleSdJwtVcWithStatus,
+        presentationFrame: {},
+      })
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+      })
+
+      expect(verificationResult).toEqual({
+        isValid: false,
+        sdJwtVc: expect.any(Object),
+        error: expect.objectContaining({ message: expect.stringMatching(/too large|exceeded limit/) }),
+      })
+    })
+
     test('Verify sd-jwt-vc with status where credential is revoked and fails', async () => {
       const sdJwtVcService = agent.dependencyManager.resolve(SdJwtVcService)
 
@@ -1106,7 +1574,11 @@ describe('SdJwtVcService', () => {
       expect(verificationResult).toEqual({
         isValid: false,
         sdJwtVc: expect.any(Object),
-        error: new SDJWTException('Status is not valid'),
+        error: expect.objectContaining({
+          name: 'SDJWTException',
+          message: 'Status is not valid',
+          code: 'STATUS_INVALID',
+        }),
       })
     })
 
@@ -1253,7 +1725,11 @@ describe('SdJwtVcService', () => {
 
       expect(verificationResult).toEqual({
         isValid: false,
-        error: new SDJWTException('Verify Error: JWT is expired'),
+        error: expect.objectContaining({
+          name: 'JwtTimeClaimException',
+          message: 'Verify Error: JWT is expired',
+          code: 'JWT_EXPIRED',
+        }),
         sdJwtVc: expect.any(Object),
       })
     })
@@ -1265,7 +1741,11 @@ describe('SdJwtVcService', () => {
 
       expect(verificationResult).toEqual({
         isValid: false,
-        error: new SDJWTException('Verify Error: JWT is not yet valid'),
+        error: expect.objectContaining({
+          name: 'JwtTimeClaimException',
+          message: 'Verify Error: JWT is not yet valid',
+          code: 'JWT_NOT_YET_VALID',
+        }),
         sdJwtVc: expect.any(Object),
       })
     })
@@ -1277,7 +1757,11 @@ describe('SdJwtVcService', () => {
 
       expect(verificationResult).toEqual({
         isValid: false,
-        error: new SDJWTException('Verify Error: Invalid JWT Signature'),
+        error: expect.objectContaining({
+          name: 'SDJWTException',
+          message: 'Verify Error: Invalid JWT Signature',
+          code: 'INVALID_JWT_SIGNATURE',
+        }),
         sdJwtVc: expect.any(Object),
       })
     })
@@ -1289,8 +1773,553 @@ describe('SdJwtVcService', () => {
 
       expect(verificationResult).toEqual({
         isValid: false,
-        error: new SDJWTException('Verify Error: Invalid JWT Signature'),
+        error: expect.objectContaining({
+          name: 'SDJWTException',
+          message: 'Verify Error: Invalid JWT Signature',
+          code: 'INVALID_JWT_SIGNATURE',
+        }),
         sdJwtVc: expect.any(Object),
+      })
+    })
+
+    test('verify sd-jwt-vc signed with a sha-1 based signature algorithm and fails', async () => {
+      // SHA-1 based signature algorithms (such as RS1) are not registered JWA signature algorithms,
+      // and thus can never be used to sign or verify an sd-jwt-vc
+      const [jwt, ...disclosures] = simpleJwtVc.split('~')
+      const [encodedHeader, encodedPayload, signature] = jwt.split('.')
+      const header = JsonEncoder.fromBase64Url(encodedHeader)
+
+      const sha1SignedSdJwtVc = [
+        [JsonEncoder.toBase64Url({ ...header, alg: 'RS1' }), encodedPayload, signature].join('.'),
+        ...disclosures,
+      ].join('~')
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: sha1SignedSdJwtVc,
+      })
+
+      expect(verificationResult).toEqual({
+        isValid: false,
+        error: new CredoError("Expected JWT header 'alg' to be a known JWA signature algorithm, found 'RS1'"),
+        sdJwtVc: expect.any(Object),
+      })
+    })
+  })
+
+  describe('SdJwtVcService.verify with getTrustedIssuersForVerification', () => {
+    const presentDid = () =>
+      sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleJwtVc,
+        presentationFrame: {},
+        verifierMetadata: { issuedAt: Date.now() / 1000, audience: verifierDid, nonce: 'salt' },
+      })
+
+    const presentX509 = () =>
+      sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleX509.sdJwtVc,
+        presentationFrame: {},
+        verifierMetadata: { issuedAt: Date.now() / 1000, audience: verifierDid, nonce: 'salt' },
+      })
+
+    afterEach(() => {
+      const x509ModuleConfig = agent.context.dependencyManager.resolve(X509ModuleConfig)
+      agent.context.config.setTrustedIssuersForVerification(undefined)
+      x509ModuleConfig.setTrustedCertificatesForVerification(undefined)
+      x509ModuleConfig.setTrustedCertificates(undefined)
+    })
+
+    test('did issuer is accepted when returned as a trusted issuer', async () => {
+      const presentation = await presentDid()
+      const issuerDid = issuerDidUrl.split('#')[0]
+      agent.context.config.setTrustedIssuersForVerification(async () => ({
+        trustedIssuers: [{ method: 'did', issuance: issuerDid }],
+      }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('did issuer is rejected when not in the trusted issuers', async () => {
+      const presentation = await presentDid()
+      agent.context.config.setTrustedIssuersForVerification(async () => ({
+        trustedIssuers: [
+          { method: 'did', issuance: 'did:key:zUC74VEqqhEHQcgv4zagSPkqFJxuNWuoBPKjJuHETEUeHLoSqWt92viSsmaWjy82y' },
+        ],
+      }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+      if (!verificationResult.isValid) {
+        expect(verificationResult.error?.message).toContain('is not trusted')
+      }
+    })
+
+    test('x509 issuer is accepted when its certificate is returned as a trusted issuer', async () => {
+      const presentation = await presentX509()
+      agent.context.config.setTrustedIssuersForVerification(async () => ({
+        trustedIssuers: [{ method: 'x509', issuance: [simpleX509.trustedCertificate] }],
+      }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('x509 issuer is rejected when a different certificate is trusted', async () => {
+      const presentation = await presentX509()
+      agent.context.config.setTrustedIssuersForVerification(async () => ({
+        trustedIssuers: [{ method: 'x509', issuance: [funkeX509.trustedCertificate] }],
+      }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+    })
+
+    test('returning an empty trusted issuers array hard-rejects an x509 issuer', async () => {
+      const presentation = await presentX509()
+      agent.context.config.setTrustedIssuersForVerification(async () => ({ trustedIssuers: [] }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+    })
+
+    test('the generic callback takes precedence over the deprecated x509 callback', async () => {
+      const presentation = await presentX509()
+
+      // Deprecated x509 callback would trust the correct certificate...
+      agent.context.dependencyManager
+        .resolve(X509ModuleConfig)
+        .setTrustedCertificatesForVerification(async () => [simpleX509.trustedCertificate])
+      // ...but the generic callback takes precedence and trusts a different certificate.
+      agent.context.config.setTrustedIssuersForVerification(async () => ({
+        trustedIssuers: [{ method: 'x509', issuance: [funkeX509.trustedCertificate] }],
+      }))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+    })
+
+    test('did issuer is allowed by default when no trusted issuers are configured', async () => {
+      const presentation = await presentDid()
+
+      // No `getTrustedIssuersForVerification` callback set: did issuers remain allowed by default,
+      // preserving the pre-existing (v0.7.0) behavior.
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('falls back to the deprecated x509 callback when no generic callback is set', async () => {
+      const presentation = await presentX509()
+      const x509ModuleConfig = agent.context.dependencyManager.resolve(X509ModuleConfig)
+      x509ModuleConfig.setTrustedCertificates(undefined)
+
+      // Only the deprecated x509 callback is configured (no generic callback): it must still gate
+      // verification, exactly as in v0.7.0.
+      x509ModuleConfig.setTrustedCertificatesForVerification(async () => [simpleX509.trustedCertificate])
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('falls back to statically configured trusted certificates when no callback is set', async () => {
+      const presentation = await presentX509()
+      const x509ModuleConfig = agent.context.dependencyManager.resolve(X509ModuleConfig)
+
+      // Neither callback configured: the static `trustedCertificates` list is the final fallback.
+      x509ModuleConfig.setTrustedCertificates([simpleX509.trustedCertificate])
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        keyBinding: { audience: verifierDid, nonce: 'salt' },
+        requiredClaimKeys: ['claim'],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+  })
+
+  describe('SdJwtVcService.verify status list against the matched trusted issuer', () => {
+    const issuerDid = () => issuerDidUrl.split('#')[0]
+
+    const createSigningCertificate = async (commonName: string) => {
+      const key = PublicJwk.fromPublicJwk((await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })).publicJwk)
+      const certificate = await X509Service.createCertificate(agent.context, {
+        authorityKey: key,
+        issuer: { commonName },
+        validity: { notBefore: new Date('2020-01-01'), notAfter: new Date('2035-01-01') },
+      })
+      certificate.keyId = key.keyId
+      return { key, certificate }
+    }
+
+    const signX509CredentialWithStatus = async (certificate: X509Certificate) => {
+      const signed = await sdJwtVcService.sign(agent.context, {
+        payload: {
+          vct: 'IdentityCredential',
+          claim: 'some-claim',
+          status: { status_list: { idx: 12, uri: 'https://example.com/status-list' } },
+        } as SdJwtVcPayload,
+        issuer: { method: 'x5c', x5c: [certificate] },
+      })
+
+      return sdJwtVcService.present(agent.context, { sdJwtVc: signed, presentationFrame: {} })
+    }
+
+    afterEach(() => {
+      const x509ModuleConfig = agent.context.dependencyManager.resolve(X509ModuleConfig)
+      agent.context.config.setTrustedIssuersForVerification(undefined)
+      x509ModuleConfig.setTrustedCertificatesForVerification(undefined)
+      x509ModuleConfig.setTrustedCertificates(undefined)
+    })
+
+    test('did: status list signed by the trusted issuer did is accepted', async () => {
+      mockStatusList(await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, []))
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleSdJwtVcWithStatus,
+        presentationFrame: {},
+      })
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'did', issuance: issuerDid() }],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('did: status list signed by a different did is rejected', async () => {
+      const otherKey = PublicJwk.fromPublicJwk(
+        (await agent.kms.createKey({ type: { kty: 'OKP', crv: 'Ed25519' } })).publicJwk
+      )
+      const otherDidDocument = new DidKey(otherKey).didDocument
+      const otherDidUrl = (otherDidDocument.verificationMethod ?? [])[0].id
+      await agent.dids.import({
+        didDocument: otherDidDocument,
+        did: otherDidDocument.id,
+        keys: [{ didDocumentRelativeKeyId: `#${otherDidUrl.split('#')[1]}`, kmsKeyId: otherKey.keyId }],
+      })
+
+      mockStatusList(await generateStatusList(agent.context, otherKey, otherDidUrl, 24, []))
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleSdJwtVcWithStatus,
+        presentationFrame: {},
+      })
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'did', issuance: issuerDid() }],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+      if (!verificationResult.isValid) {
+        expect(verificationResult.error?.message).toContain('Status List JWT verification failed')
+      }
+    })
+
+    test('status validation can be disabled even when the credential is revoked', async () => {
+      mockStatusList(await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [12]))
+
+      const presentation = await sdJwtVcService.present(agent.context, {
+        sdJwtVc: simpleSdJwtVcWithStatus,
+        presentationFrame: {},
+      })
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'did', issuance: issuerDid() }],
+        disableStatusValidation: true,
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('x509: status list signed by a dedicated trusted status certificate is accepted', async () => {
+      const issuance = await createSigningCertificate('Issuance')
+      const status = await createSigningCertificate('Status')
+
+      const presentation = await signX509CredentialWithStatus(issuance.certificate)
+      mockStatusList(await generateX509StatusList(agent.context, status.key, status.certificate, 24, []))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [
+          {
+            method: 'x509',
+            issuance: [issuance.certificate.toString('base64')],
+            status: [status.certificate.toString('base64')],
+          },
+        ],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('x509: status list signed by a certificate not in the status certificates is rejected', async () => {
+      const issuance = await createSigningCertificate('Issuance')
+      const status = await createSigningCertificate('Status')
+
+      const presentation = await signX509CredentialWithStatus(issuance.certificate)
+      mockStatusList(await generateX509StatusList(agent.context, status.key, status.certificate, 24, []))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [
+          {
+            method: 'x509',
+            issuance: [issuance.certificate.toString('base64')],
+            // Status list is signed by `status`, but only `issuance` is trusted to sign status lists.
+            status: [issuance.certificate.toString('base64')],
+          },
+        ],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+      if (!verificationResult.isValid) {
+        expect(verificationResult.error?.message).toContain('Status List JWT verification failed')
+      }
+    })
+
+    test('x509: falls back to the issuance certificates when no status certificates are configured', async () => {
+      const issuance = await createSigningCertificate('Issuance')
+
+      const presentation = await signX509CredentialWithStatus(issuance.certificate)
+      // Status list is signed by the issuance certificate (same as the credential signer).
+      mockStatusList(await generateX509StatusList(agent.context, issuance.key, issuance.certificate, 24, []))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'x509', issuance: [issuance.certificate.toString('base64')] }],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('x509: falls back to issuance certs for a leaf-under-root chain when no status certs are configured', async () => {
+      const rootKey = PublicJwk.fromPublicJwk(
+        (await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })).publicJwk
+      )
+      const leafKey = PublicJwk.fromPublicJwk(
+        (await agent.kms.createKey({ type: { kty: 'EC', crv: 'P-256' } })).publicJwk
+      )
+
+      const rootCertificate = await X509Service.createCertificate(agent.context, {
+        authorityKey: rootKey,
+        issuer: { commonName: 'Root' },
+        validity: { notBefore: new Date('2020-01-01'), notAfter: new Date('2035-01-01') },
+        extensions: { basicConstraints: { ca: true } },
+      })
+      rootCertificate.keyId = rootKey.keyId
+
+      const leafCertificate = await X509Service.createCertificate(agent.context, {
+        authorityKey: rootKey,
+        subjectPublicKey: leafKey,
+        issuer: { commonName: 'Root' },
+        subject: { commonName: 'Leaf' },
+        validity: { notBefore: new Date('2020-01-01'), notAfter: new Date('2035-01-01') },
+      })
+      leafCertificate.keyId = leafKey.keyId
+
+      const presentation = await signX509CredentialWithStatus(leafCertificate)
+      // Status list is signed by the same leaf as the credential.
+      mockStatusList(await generateX509StatusList(agent.context, leafKey, leafCertificate, 24, []))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'x509', issuance: [rootCertificate.toString('base64')] }],
+      })
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('x509: an empty status certificates array rejects any status list', async () => {
+      const issuance = await createSigningCertificate('Issuance')
+
+      const presentation = await signX509CredentialWithStatus(issuance.certificate)
+      mockStatusList(await generateX509StatusList(agent.context, issuance.key, issuance.certificate, 24, []))
+
+      const verificationResult = await sdJwtVcService.verify(agent.context, {
+        compactSdJwtVc: presentation,
+        trustedIssuers: [{ method: 'x509', issuance: [issuance.certificate.toString('base64')], status: [] }],
+      })
+
+      expect(verificationResult.isValid).toBe(false)
+      if (!verificationResult.isValid) {
+        expect(verificationResult.error?.message).toContain('Status List JWT verification failed')
+      }
+    })
+  })
+
+  describe('SdJwtVcService.verify fetches the status list', () => {
+    const statusListUri = 'https://example.com/status-list'
+
+    const presentWithStatus = async () => {
+      const sdJwtVcService = agent.dependencyManager.resolve(SdJwtVcService)
+      return sdJwtVcService.present(agent.context, { sdJwtVc: simpleSdJwtVcWithStatus, presentationFrame: {} })
+    }
+
+    const verify = async (compactSdJwtVc: string) => {
+      const sdJwtVcService = agent.dependencyManager.resolve(SdJwtVcService)
+      return sdJwtVcService.verify(agent.context, { compactSdJwtVc })
+    }
+
+    afterEach(() => {
+      agent.context.dependencyManager.registerInstance(SdJwtVcModuleConfig, new SdJwtVcModuleConfig())
+    })
+
+    test('uses the custom status list fetcher instead of an HTTP GET', async () => {
+      const statusList = await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [])
+      const customStatusListFetcher = vi.fn(async () => statusList)
+      agent.context.dependencyManager.registerInstance(
+        SdJwtVcModuleConfig,
+        new SdJwtVcModuleConfig({ customStatusListFetcher })
+      )
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult.isValid).toBe(true)
+      expect(customStatusListFetcher).toHaveBeenCalledWith(statusListUri, {
+        defaultFetcher: expect.any(Function),
+      })
+    })
+
+    test('the custom status list fetcher can delegate to the default fetcher', async () => {
+      const scope = mockStatusList(await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, []))
+      let defaultFetcher: Mock<() => Promise<string>> | undefined
+      const customStatusListFetcher: CustomStatusListFetcher = async (_uri, options) => {
+        defaultFetcher = vi.fn(options.defaultFetcher)
+        return defaultFetcher()
+      }
+      agent.context.dependencyManager.registerInstance(
+        SdJwtVcModuleConfig,
+        new SdJwtVcModuleConfig({ customStatusListFetcher })
+      )
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult.isValid).toBe(true)
+      expect(defaultFetcher).toHaveBeenCalledTimes(1)
+      expect(scope.isDone()).toBe(true)
+    })
+
+    test('verifies the status against the status list JWT the custom status list fetcher returns', async () => {
+      const statusList = await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [12])
+      agent.context.dependencyManager.registerInstance(
+        SdJwtVcModuleConfig,
+        new SdJwtVcModuleConfig({ customStatusListFetcher: async () => statusList })
+      )
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult).toEqual({
+        isValid: false,
+        sdJwtVc: expect.any(Object),
+        error: expect.objectContaining({
+          name: 'SDJWTException',
+          message: 'Status is not valid',
+          code: 'STATUS_INVALID',
+        }),
+      })
+    })
+
+    test("rejects a status list JWT whose 'typ' is not 'statuslist+jwt'", async () => {
+      mockStatusList(await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [], { typ: 'JWT' }))
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult).toEqual({
+        isValid: false,
+        sdJwtVc: expect.any(Object),
+        error: expect.objectContaining({
+          name: 'SLException',
+          message: "The typ header 'JWT' must be equal to 'statuslist+jwt'",
+        }),
+      })
+    })
+
+    test("accepts a status list JWT whose 'typ' is 'application/statuslist+jwt'", async () => {
+      mockStatusList(
+        await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [], { typ: 'application/statuslist+jwt' })
+      )
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult.isValid).toBe(true)
+    })
+
+    test('rejects an http status list uri when insecure http urls are not allowed', async () => {
+      const sdJwtVcService = agent.dependencyManager.resolve(SdJwtVcService)
+      const fetchSpy = vi.spyOn(agent.context.config, 'fetch')
+      const signed = await sdJwtVcService.sign(agent.context, {
+        payload: {
+          vct: 'IdentityCredential',
+          status: { status_list: { idx: 12, uri: 'http://example.com/status-list' } },
+        } as SdJwtVcPayload,
+        issuer: { method: 'did', didUrl: issuerDidUrl },
+      })
+
+      const verificationResult = await verify(
+        await sdJwtVcService.present(agent.context, { sdJwtVc: signed, presentationFrame: {} })
+      )
+
+      expect(verificationResult.isValid).toBe(false)
+      if (!verificationResult.isValid) {
+        expect(verificationResult.error?.message).toContain('Only https urls are supported')
+      }
+      expect(fetchSpy).not.toHaveBeenCalled()
+    })
+
+    test("rejects a status list JWT whose 'sub' is not the uri of the status claim", async () => {
+      const otherUri = 'https://example.com/other-status-list'
+      mockStatusList(await generateStatusList(agent.context, issuerKey, issuerDidUrl, 24, [], { sub: otherUri }))
+
+      const verificationResult = await verify(await presentWithStatus())
+
+      expect(verificationResult).toEqual({
+        isValid: false,
+        sdJwtVc: expect.any(Object),
+        // `@sd-jwt/sd-jwt-vc` does this check
+        error: new SLException(`The subject claim '${otherUri}' must be equal to the uri '${statusListUri}'`),
       })
     })
   })
@@ -1411,6 +2440,33 @@ describe('SdJwtVcService', () => {
         typeMetadataChain: [mockMetadata],
         vctValues: ['https://example.com/v1/credentials/identity/verified'],
       })
+    })
+
+    test('Fetch type metadata throws error when the type metadata describes another vct', async () => {
+      mockJwtDecode({
+        payload: {
+          vct: 'https://example.com/credentials/identity',
+        },
+      })
+
+      // The holder of the URL claims another type, which a verifier could be requesting
+      nock('https://example.com')
+        .get('/credentials/identity')
+        .reply(200, { vct: 'urn:eudi:pid:1', name: 'Identity Credential' })
+
+      await expect(
+        sdJwtVcService.fetchTypeMetadata(
+          agent.context,
+          {
+            payload: {
+              vct: 'https://example.com/credentials/identity',
+            },
+          } as unknown as SdJwtVc,
+          { throwErrorOnFetchError: false, throwErrorOnUnsupportedVctValue: false }
+        )
+      ).rejects.toThrow(
+        "Type metadata fetched for vct 'https://example.com/credentials/identity' describes vct 'urn:eudi:pid:1'"
+      )
     })
 
     test('Fetch type metadata throws error for non-https vct', async () => {
@@ -1535,6 +2591,35 @@ describe('SdJwtVcService', () => {
       )
     })
 
+    test('Fetch type metadata throws error when the response is larger than the fetch limit', async () => {
+      mockJwtDecode({
+        payload: {
+          vct: 'https://example.com/credentials/identity',
+        },
+      })
+
+      nock('https://example.com')
+        .get('/credentials/identity')
+        .reply(200, {
+          vct: 'https://example.com/credentials/identity',
+          name: 'a'.repeat(agent.config.fetchLimits.maxResponseBytes),
+        })
+
+      nock('https://example.com').get('/.well-known/vct/credentials/identity').reply(404)
+
+      await expect(
+        sdJwtVcService.fetchTypeMetadata(agent.context, {
+          payload: {
+            vct: 'https://example.com/credentials/identity',
+          },
+        } as unknown as SdJwtVc)
+      ).rejects.toMatchObject({
+        message:
+          "Unable to resolve type metadata vct 'https://example.com/credentials/identity'. Fetch returned a non-successful response.",
+        cause: expect.objectContaining({ message: expect.stringMatching(/too large|exceeded limit/) }),
+      })
+    })
+
     test('Fetch type metadata with valid vct#integrity (sha256) should succeed', async () => {
       const mockMetadata = {
         vct: 'https://example.com/credentials/identity',
@@ -1544,7 +2629,7 @@ describe('SdJwtVcService', () => {
 
       const metadataJson = JSON.stringify(mockMetadata)
       // Compute the actual sha256 hash of the metadata
-      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-256'))
+      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-256'))
       const integrityMetadata = `sha256-${hash}`
 
       mockJwtDecode({
@@ -1579,7 +2664,7 @@ describe('SdJwtVcService', () => {
       }
 
       const metadataJson = JSON.stringify(mockMetadata)
-      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-384'))
+      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-384'))
       const integrityMetadata = `sha384-${hash}`
 
       mockJwtDecode({
@@ -1614,7 +2699,7 @@ describe('SdJwtVcService', () => {
       }
 
       const metadataJson = JSON.stringify(mockMetadata)
-      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-512'))
+      const hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-512'))
       const integrityMetadata = `sha512-${hash}`
 
       mockJwtDecode({
@@ -1681,8 +2766,12 @@ describe('SdJwtVcService', () => {
       }
 
       const metadataJson = JSON.stringify(mockMetadata)
-      const sha256Hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-256'))
-      const sha512Hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-512'))
+      const sha256Hash = TypedArrayEncoder.toBase64(
+        Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-256')
+      )
+      const sha512Hash = TypedArrayEncoder.toBase64(
+        Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-512')
+      )
       // Provide both sha256 and sha512, the verifier should use sha512 as it's stronger
       const integrityMetadata = `sha256-${sha256Hash} sha512-${sha512Hash}`
 
@@ -1744,7 +2833,9 @@ describe('SdJwtVcService', () => {
 
       const metadataJson = JSON.stringify(mockMetadata)
       const incorrectSha256Hash = 'invalidhash1234567890abcdef='
-      const sha512Hash = TypedArrayEncoder.toBase64(Hasher.hash(TypedArrayEncoder.fromString(metadataJson), 'sha-512'))
+      const sha512Hash = TypedArrayEncoder.toBase64(
+        Hasher.hash(TypedArrayEncoder.fromUtf8String(metadataJson), 'sha-512')
+      )
       // sha512 is stronger and correct, so it should succeed even if sha256 is wrong
       const integrityMetadata = `sha256-${incorrectSha256Hash} sha512-${sha512Hash}`
 

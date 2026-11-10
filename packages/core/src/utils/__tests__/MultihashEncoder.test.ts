@@ -1,9 +1,9 @@
 import { Hasher } from '../../crypto'
-import { Buffer } from '../buffer'
+import { CredoError } from '../../error'
 import { MultiHashEncoder } from '../MultiHashEncoder'
 import { TypedArrayEncoder } from '../TypedArrayEncoder'
 
-const validData = Buffer.from('Hello World!')
+const validData = TypedArrayEncoder.fromUtf8String('Hello World!')
 const validMultiHash = new Uint8Array([
   18, 32, 127, 131, 177, 101, 127, 241, 252, 83, 185, 45, 193, 129, 72, 161, 214, 93, 252, 45, 75, 31, 163, 214, 119,
   40, 74, 221, 210, 0, 18, 109, 144, 105,
@@ -17,6 +17,10 @@ describe('MultiHashEncoder', () => {
       const multihash = MultiHashEncoder.encode(validData, 'sha-256')
       expect(TypedArrayEncoder.equals(multihash, validMultiHash)).toBe(true)
     })
+
+    it('does not encode SHA-1 multihashes', () => {
+      expect(() => MultiHashEncoder.encode(validData, 'sha-1')).toThrow(CredoError)
+    })
   })
 
   describe('decode()', () => {
@@ -26,10 +30,33 @@ describe('MultiHashEncoder', () => {
       expect(TypedArrayEncoder.equals(data, validHash)).toBe(true)
     })
 
+    it.each([
+      ['sha-384', 48],
+      ['sha-512', 64],
+    ] as const)('round-trips %s multihashes', (hashName, digestLength) => {
+      const multihash = MultiHashEncoder.encode(validData, hashName)
+      const decoded = MultiHashEncoder.decode(multihash)
+
+      expect(decoded.hashName).toBe(hashName)
+      expect(decoded.data).toHaveLength(digestLength)
+      expect(TypedArrayEncoder.equals(decoded.data, Hasher.hash(validData, hashName))).toBe(true)
+    })
+
     it('Decodes invalid multihash', () => {
       expect(() => {
         MultiHashEncoder.decode(invalidMultiHash)
-      }).toThrow()
+      }).toThrow(CredoError)
+    })
+
+    it.each([
+      new Uint8Array([0x63, 0x20, ...new Uint8Array(32)]),
+      new Uint8Array([0x12, 0x1f, ...new Uint8Array(32)]),
+      validMultiHash.slice(0, -1),
+      new Uint8Array([...validMultiHash, 0]),
+      new Uint8Array([0x12, 0x30, ...new Uint8Array(48)]),
+      new Uint8Array([0x11, 0x14, ...new Uint8Array(20)]),
+    ])('rejects malformed multihash %j', (multihash) => {
+      expect(() => MultiHashEncoder.decode(multihash)).toThrow(CredoError)
     })
   })
 

@@ -4,11 +4,7 @@ import config from '../../tsdown.config.base'
 export default defineConfig(
   config.map((item) => ({
     ...item,
-    entry: [
-      './src/index.ts',
-      './src/modules/vc/data-integrity/libraries/nativeDocumentLoader.native.ts',
-      './src/modules/kms/index.ts',
-    ],
+    entry: ['./src/index.ts', './src/modules/kms/index.ts'],
     plugins: [
       ...(Array.isArray(item.plugins) ? item.plugins : []),
       {
@@ -24,6 +20,8 @@ export default defineConfig(
       },
     ],
     // We import events package types, but the implementation is
-    external: ['events'],
+    deps: {
+      neverBundle: ['events'],
+    },
   }))
 )

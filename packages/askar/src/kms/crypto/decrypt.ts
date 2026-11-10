@@ -1,17 +1,13 @@
-import { type AnyUint8Array, Kms } from '@credo-ts/core'
+import { Kms } from '@credo-ts/core'
 import { Key } from '@openwallet-foundation/askar-shared'
 import { jwkEncToAskarAlg } from '../../utils'
 
 // TODO: should we make these methods generic, so they can be reused across backends?
-type AskarSupportedDecryptionOptions = Kms.KmsDecryptDataDecryption & {
+export type AskarSupportedDecryptionOptions = Kms.KmsDecryptDataContentDecryption & {
   algorithm: keyof typeof jwkEncToAskarAlg
 }
 
-export function aeadDecrypt(options: {
-  key: Key
-  decryption: AskarSupportedDecryptionOptions
-  encrypted: AnyUint8Array
-}) {
+export function aeadDecrypt(options: { key: Key; decryption: AskarSupportedDecryptionOptions; encrypted: Uint8Array }) {
   const { key, decryption, encrypted } = options
 
   const askarEncryptionAlgorithm = jwkEncToAskarAlg[decryption.algorithm]

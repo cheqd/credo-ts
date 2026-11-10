@@ -1,15 +1,14 @@
-import type { AnyUint8Array } from '../../../../../types'
 import { KnownJwaKeyAgreementAlgorithms, type KnownJwaSignatureAlgorithm, KnownJwaSignatureAlgorithms } from '../../jwa'
 import type { PublicJwkType } from '../PublicJwk'
 import type { KmsJwkPublicEc } from './ecJwk'
-import { ecPublicJwkToPublicKey, ecPublicKeyToPublicJwk } from './ecPublicKey'
+import { ecMulticodecToPublicJwk, ecPublicJwkToPublicKey, ecPublicKeyToPublicJwk } from './ecPublicKey'
 
 type Jwk = KmsJwkPublicEc & { crv: 'secp256k1' }
 
 export class Secp256k1PublicJwk implements PublicJwkType<Jwk> {
   public static supportedSignatureAlgorithms: KnownJwaSignatureAlgorithm[] = [KnownJwaSignatureAlgorithms.ES256K]
   public static supportedEncryptionKeyAgreementAlgorithms = [KnownJwaKeyAgreementAlgorithms.ECDH_ES]
-  public static multicodecPrefix = 231
+  public static multicodecPrefix = 0xe7
 
   public supportedEncryptionKeyAgreementAlgorithms = Secp256k1PublicJwk.supportedEncryptionKeyAgreementAlgorithms
   public supportedSignatureAlgorithms = Secp256k1PublicJwk.supportedSignatureAlgorithms
@@ -37,13 +36,13 @@ export class Secp256k1PublicJwk implements PublicJwkType<Jwk> {
     return ecPublicJwkToPublicKey(this.jwk, { compressed: true })
   }
 
-  public static fromPublicKey(publicKey: AnyUint8Array) {
+  public static fromPublicKey(publicKey: Uint8Array) {
     const jwk = ecPublicKeyToPublicJwk(publicKey, 'secp256k1')
     return new Secp256k1PublicJwk(jwk)
   }
 
-  public static fromMulticodec(multicodec: AnyUint8Array) {
-    const jwk = ecPublicKeyToPublicJwk(multicodec, 'secp256k1')
+  public static fromMulticodec(multicodec: Uint8Array) {
+    const jwk = ecMulticodecToPublicJwk(multicodec, 'secp256k1')
     return new Secp256k1PublicJwk(jwk)
   }
 }

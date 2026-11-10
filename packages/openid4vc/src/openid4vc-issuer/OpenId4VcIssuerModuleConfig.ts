@@ -1,8 +1,10 @@
+import type { Kms } from '@credo-ts/core'
 import type { Express } from 'express'
 import type {
   OpenId4VciCredentialRequestToCredentialMapper,
   OpenId4VciDeferredCredentialRequestToCredentialMapper,
   OpenId4VciGetChainedAuthorizationRequestParameters,
+  OpenId4VciGetDynamicIssuanceSession,
   OpenId4VciGetVerificationSession,
 } from './OpenId4VcIssuerServiceOptions'
 
@@ -13,6 +15,7 @@ const DEFAULT_REFRESH_TOKEN_EXPIRES_IN = 90 * 24 * 60 * 60 // 90 days
 const DEFAULT_DEFERRAL_INTERVAL_GRACE_PERIOD = 7 * 24 * 60 * 60 // 7 days
 const DEFAULT_STATEFUL_CREDENTIAL_OFFER_EXPIRES_IN = 3 * 60 // 3 minutes
 const DEFAULT_REQUEST_URI_EXPIRES_IN = 1 * 60 // 1 minute
+const DEFAULT_TX_CODE_MAX_ATTEMPTS = 5
 
 export interface InternalOpenId4VcIssuerModuleConfigOptions {
   /**
@@ -73,6 +76,18 @@ export interface InternalOpenId4VcIssuerModuleConfigOptions {
   refreshTokenExpiresInSeconds?: number
 
   /**
+   * Whether refresh tokens are generated for all issuance sessions. Refresh tokens are bound to the DPoP key of
+   * the wallet, so this can't be enabled when DPoP isn't required (`dpopRequired`, or `requireDpop` for the
+   * session). Creating an issuance session with that combination throws an error.
+   *
+   * This value can be overridden per issuance session when creating a credential offer (`generateRefreshTokens`)
+   * or in the `getDynamicIssuanceSession` callback (`generateRefreshTokens`).
+   *
+   * @default false
+   */
+  generateRefreshTokens?: boolean
+
+  /**
    * The time after which a pushed authorization request URI will expire.
    *
    * @default 60 (1 minute)
@@ -80,33 +95,93 @@ export interface InternalOpenId4VcIssuerModuleConfigOptions {
   requestUriExpiresInSeconds?: number
 
   /**
-   * Whether DPoP is required for all issuance sessions. This value can be overridden when creating
-   * a credential offer. If dpop is not required, but used by a client in the first request to credo,
-   * DPoP will be required going forward.
+   * Whether DPoP is required for all issuance sessions. If dpop is not required, but used by a client in the
+   * first request to credo, DPoP will be required going forward.
    *
-   * @default false
+   * This value can be overridden per issuance session when creating a credential offer (`authorization.requireDpop`)
+   * or in the `getDynamicIssuanceSession` callback (`requireDpop`).
+   *
+   * @default true
    */
   dpopRequired?: boolean
 
   /**
-   * Whether wallet attestations are required for all issuance sessions. This value can be overridden when creating
-   * a credential offer, but will have effect for dynamic issuance sessions. If wallet attestations are not required
-   * but used by a client in the first request to credo,
-   * wallet attestations will be required going forward.
+   * The DPoP signing algorithms supported by all issuers. Can be overridden per issuer with
+   * `dpopSigningAlgValuesSupported` on the issuer record.
+   *
+   * If not provided, all signature algorithms supported by the agent's KMS are used.
+   */
+  dpopSigningAlgValuesSupported?: [Kms.KnownJwaSignatureAlgorithm, ...Kms.KnownJwaSignatureAlgorithm[]]
+
+  /**
+   * Whether PKCE is required for authorization requests (pushed authorization requests and authorization
+   * challenge requests). When enabled, authorization requests without a `code_challenge` are rejected. When
+   * a client provides a `code_challenge` it is always verified at the token endpoint, regardless of this option.
+   *
+   * This value can be overridden per issuance session when creating a credential offer (`authorization.requirePkce`)
+   * or in the `getDynamicIssuanceSession` callback (`requirePkce`).
+   *
+   * Only the `S256` code challenge method is supported.
+   *
+   * @default true
+   */
+  pkceRequired?: boolean
+
+  /**
+   * Invalid `tx_code` attempts before the issuance session moves to `Error`, enforced across concurrent
+   * requests only with storage that supports locking (e.g. Postgres).
+   *
+   * @default 5
+   */
+  txCodeMaxAttempts?: number
+
+  /**
+   * Whether wallet attestations are required for all issuance sessions. If wallet attestations are not required
+   * but used by a client in the first request to credo, wallet attestations will be required going forward.
+   *
+   * This value can be overridden per issuance session when creating a credential offer
+   * (`authorization.requireWalletAttestation`) or in the `getDynamicIssuanceSession` callback
+   * (`requireWalletAttestation`).
    *
    * @default false
    */
   walletAttestationsRequired?: boolean
 
   /**
-   * Whether to allow dynamic issuance sessions based on a credential request.
-   *
-   * This requires an external authorization server which issues access tokens without
-   * a `pre-authorized_code` or `issuer_state` parameter.
-   *
-   * Credo only support stateful credential offer sessions (pre-auth or presentation during issuance)
+   * Whether to ignore wallet attestations that a client provides when they are not required for the issuance
+   * session. By default a provided wallet attestation is always verified, and the request is rejected if it
+   * is invalid. When enabled, a wallet attestation that is not required is not verified, and it won't
+   * become required for the rest of the issuance session.
    *
    * @default false
+   */
+  ignoreWalletAttestationsWhenNotRequired?: boolean
+
+  /**
+   * Whether a Client Attestation PoP `challenge` is required when a client authenticates using a client
+   * attestation, as defined in draft 09 of OAuth 2.0 Attestation-Based Client Authentication.
+   *
+   * When enabled, the authorization server metadata advertises a `challenge_endpoint`, and client
+   * attestation pop JWTs must include a valid `challenge` obtained from that endpoint (per §6.1, offering
+   * a challenge endpoint makes the challenge mandatory). When disabled the challenge endpoint is not
+   * advertised and no challenge is enforced.
+   *
+   * @default false
+   */
+  clientAttestationPopChallengeRequired?: boolean
+
+  /**
+   * Whether to allow dynamic issuance sessions based on a credential request.
+   *
+   * This only works with **external authorization servers** which issue access tokens without
+   * a `pre-authorized_code` or `issuer_state` parameter.
+   *
+   * For full control including support for presentation during issuance and chained authorization
+   * it is recommended to use the `getDynamicIssuanceSession` callback instead.
+   *
+   * @default false
+   *
+   * @deprecated
    */
   allowDynamicIssuanceSessions?: boolean
 
@@ -150,6 +225,24 @@ export interface InternalOpenId4VcIssuerModuleConfigOptions {
   getChainedAuthorizationRequestParameters?: OpenId4VciGetChainedAuthorizationRequestParameters
 
   /**
+   * Callback to get the issuance session options for a dynamic (wallet-initiated) issuance request
+   * that is not bound to a credential offer. This will be called when:
+   *
+   * - a Pushed Authorization Request or Authorization Challenge request is received by the internal
+   *   authorization server without an `issuer_state` (the `chained` and `presentation` flows), or
+   * - the credential endpoint receives an access token issued by an external authorization server
+   *   that is not bound to a credential offer (the `external` flow).
+   *
+   * This callback is the single decision point for dynamic issuance and acts as the
+   * application-level abuse-prevention gate: returning session options allows the issuance, while
+   * throwing an `Oauth2ServerErrorResponseError` or returning `undefined`/`null` denies it.
+   *
+   * Required to support dynamic issuance for the chained authorization server, presentation during
+   * issuance, or external authorization server flow.
+   */
+  getDynamicIssuanceSession?: OpenId4VciGetDynamicIssuanceSession
+
+  /**
    * Custom the paths used for endpoints
    */
   endpoints?: {
@@ -162,6 +255,11 @@ export interface InternalOpenId4VcIssuerModuleConfigOptions {
      * @default /challenge
      */
     authorizationChallenge?: string
+
+    /**
+     * @default /client-attestation-challenge
+     */
+    clientAttestationChallenge?: string
 
     /**
      * @default /offers
@@ -227,11 +325,21 @@ export class OpenId4VcIssuerModuleConfig {
    */
   public getChainedAuthorizationRequestParameters?: OpenId4VciGetChainedAuthorizationRequestParameters
 
+  /**
+   * Callback to get the issuance session options for a dynamic (wallet-initiated) issuance request.
+   * This is the single decision point and abuse-prevention gate for dynamic issuance.
+   *
+   * Required to support dynamic issuance for the chained authorization server, presentation during
+   * issuance, or external authorization server flow.
+   */
+  public getDynamicIssuanceSession?: OpenId4VciGetDynamicIssuanceSession
+
   public constructor(options: InternalOpenId4VcIssuerModuleConfigOptions) {
     this.options = options
     this.getVerificationSession =
       options.getVerificationSession ?? options.getVerificationSessionForIssuanceSessionAuthorization
     this.getChainedAuthorizationRequestParameters = options.getChainedAuthorizationRequestParameters
+    this.getDynamicIssuanceSession = options.getDynamicIssuanceSession
   }
 
   public get app() {
@@ -315,6 +423,20 @@ export class OpenId4VcIssuerModuleConfig {
   }
 
   /**
+   * Whether refresh tokens are generated for all issuance sessions. Refresh tokens are bound to the DPoP key of
+   * the wallet, so this can't be enabled when DPoP isn't required (`dpopRequired`, or `requireDpop` for the
+   * session). Creating an issuance session with that combination throws an error.
+   *
+   * This value can be overridden per issuance session when creating a credential offer (`generateRefreshTokens`)
+   * or in the `getDynamicIssuanceSession` callback (`generateRefreshTokens`).
+   *
+   * @default false
+   */
+  public get generateRefreshTokens(): boolean {
+    return this.options.generateRefreshTokens ?? false
+  }
+
+  /**
    * The time after which a pushed authorization request URI will expire.
    *
    * @default 60 (1 minute)
@@ -324,26 +446,79 @@ export class OpenId4VcIssuerModuleConfig {
   }
 
   /**
-   * Whether DPoP is required for all issuance sessions. This value can be overridden when creating
-   * a credential offer. If dpop is not required, but used by a client in the first request to credo,
-   * DPoP will be required going forward.
+   * Whether DPoP is required for all issuance sessions. If dpop is not required, but used by a client in the
+   * first request to credo, DPoP will be required going forward.
    *
-   * @default false
+   * This value can be overridden per issuance session when creating a credential offer (`authorization.requireDpop`)
+   * or in the `getDynamicIssuanceSession` callback (`requireDpop`).
+   *
+   * @default true
    */
   public get dpopRequired(): boolean {
-    return this.options.dpopRequired ?? false
+    return this.options.dpopRequired ?? true
   }
 
   /**
-   * Whether wallet attestations are required for all issuance sessions. This value can be overridden when creating
-   * a credential offer, but will have effect for dynamic issuance sessions. If wallet attestations are not required
-   * but used by a client in the first request to credo,
-   * wallet attestations will be required going forward.
+   * The DPoP signing algorithms supported by all issuers. Can be overridden per issuer with
+   * `dpopSigningAlgValuesSupported` on the issuer record.
+   *
+   * If not provided, all signature algorithms supported by the agent's KMS are used.
+   */
+  public get dpopSigningAlgValuesSupported() {
+    return this.options.dpopSigningAlgValuesSupported
+  }
+
+  /**
+   * Whether PKCE is required for authorization requests. When a client provides
+   * a `code_challenge` it is always verified, regardless of this option.
+   *
+   * @default true
+   */
+  public get pkceRequired(): boolean {
+    return this.options.pkceRequired ?? true
+  }
+
+  /**
+   * The number of invalid `tx_code` values a wallet can send for an issuance session.
+   *
+   * @default 5
+   */
+  public get txCodeMaxAttempts(): number {
+    return this.options.txCodeMaxAttempts ?? DEFAULT_TX_CODE_MAX_ATTEMPTS
+  }
+
+  /**
+   * Whether wallet attestations are required for all issuance sessions. If wallet attestations are not required
+   * but used by a client in the first request to credo, wallet attestations will be required going forward.
+   *
+   * This value can be overridden per issuance session when creating a credential offer
+   * (`authorization.requireWalletAttestation`) or in the `getDynamicIssuanceSession` callback
+   * (`requireWalletAttestation`).
    *
    * @default false
    */
   public get walletAttestationsRequired(): boolean {
     return this.options.walletAttestationsRequired ?? false
+  }
+
+  /**
+   * Whether to ignore wallet attestations that a client provides when they are not required for the issuance
+   * session.
+   *
+   * @default false
+   */
+  public get ignoreWalletAttestationsWhenNotRequired(): boolean {
+    return this.options.ignoreWalletAttestationsWhenNotRequired ?? false
+  }
+
+  /**
+   * Whether a Client Attestation PoP `challenge` is required when a client authenticates using a client
+   * attestation (draft 09 of OAuth 2.0 Attestation-Based Client Authentication).
+   *
+   * @default false
+   */
+  public get clientAttestationPopChallengeRequired(): boolean {
+    return this.options.clientAttestationPopChallengeRequired ?? false
   }
 
   /**
@@ -355,6 +530,8 @@ export class OpenId4VcIssuerModuleConfig {
    * Credo only supports stateful credential offer sessions (pre-auth or presentation during issuance)
    *
    * @default false
+   *
+   * @deprecated
    */
   public get allowDynamicIssuanceSessions(): boolean {
     return this.options.allowDynamicIssuanceSessions ?? false
@@ -393,6 +570,13 @@ export class OpenId4VcIssuerModuleConfig {
    */
   public get authorizationChallengeEndpointPath(): string {
     return this.options.endpoints?.authorizationChallenge ?? '/challenge'
+  }
+
+  /**
+   * @default /client-attestation-challenge
+   */
+  public get clientAttestationChallengeEndpointPath(): string {
+    return this.options.endpoints?.clientAttestationChallenge ?? '/client-attestation-challenge'
   }
 
   /**

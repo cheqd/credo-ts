@@ -36,14 +36,18 @@ import {
   type CallbackContext,
   clientAuthenticationAnonymous,
   clientAuthenticationClientAttestationJwt,
+  clientAuthenticationClientAttestationJwtDpop,
   clientAuthenticationNone,
+  decodeJwt,
   getAuthorizationServerMetadataFromList,
   type Jwk,
   Oauth2Client,
   Oauth2ServerErrorResponseError,
   preAuthorizedCodeGrantIdentifier,
-  type RequestDpopOptions,
+  type RetrieveAccessTokenReturn,
   refreshTokenGrantIdentifier,
+  requestClientAttestationChallenge,
+  SupportedClientAuthenticationMethod,
 } from '@openid4vc/oauth2'
 import {
   AuthorizationFlow,
@@ -60,8 +64,9 @@ import type { OpenId4VciCredentialConfigurationSupportedWithFormats, OpenId4VciM
 
 import { OpenId4VciCredentialFormatProfile } from '../shared'
 import { getOid4vcCallbacks } from '../shared/callbacks'
+import { getDpopOptions } from '../shared/dpop'
 import { getOfferedCredentials, getScopesFromCredentialConfigurationsSupported } from '../shared/issuerMetadataUtils'
-import { getSupportedJwaSignatureAlgorithms } from '../shared/utils'
+import { OpenId4VcHolderModuleConfig } from './OpenId4VcHolderModuleConfig'
 import type {
   OpenId4VciAcceptCredentialOfferOptions,
   OpenId4VciAuthCodeFlowOptions,
@@ -73,6 +78,7 @@ import type {
   OpenId4VciProofOfPossessionRequirements,
   OpenId4VciResolvedAuthorizationRequest,
   OpenId4VciResolvedCredentialOffer,
+  OpenId4VciResolveIssuerMetadataOptions,
   OpenId4VciRetrieveAuthorizationCodeUsingPresentationOptions,
   OpenId4VciSendNotificationOptions,
   OpenId4VciSupportedCredentialFormats,
@@ -87,12 +93,15 @@ export class OpenId4VciHolderService {
   private logger: Logger
   private w3cCredentialService: W3cCredentialService
   private w3cV2CredentialService: W3cV2CredentialService
+  private config: OpenId4VcHolderModuleConfig
 
   public constructor(
     @inject(InjectionSymbols.Logger) logger: Logger,
     w3cCredentialService: W3cCredentialService,
-    w3cV2CredentialService: W3cV2CredentialService
+    w3cV2CredentialService: W3cV2CredentialService,
+    config: OpenId4VcHolderModuleConfig
   ) {
+    this.config = config
     this.w3cCredentialService = w3cCredentialService
     this.w3cV2CredentialService = w3cV2CredentialService
     this.logger = logger
@@ -100,11 +109,14 @@ export class OpenId4VciHolderService {
 
   public async resolveIssuerMetadata(
     agentContext: AgentContext,
-    credentialIssuer: string
+    credentialIssuer: string,
+    options?: OpenId4VciResolveIssuerMetadataOptions
   ): Promise<OpenId4VciMetadata> {
     const client = this.getClient(agentContext)
 
-    const metadata = await client.resolveIssuerMetadata(credentialIssuer)
+    const metadata = await client.resolveIssuerMetadata(credentialIssuer, {
+      signedMetadata: options?.signedMetadata ?? this.config.signedMetadata,
+    })
     this.logger.debug('fetched credential issuer metadata', { metadata })
 
     return metadata
@@ -112,12 +124,15 @@ export class OpenId4VciHolderService {
 
   public async resolveCredentialOffer(
     agentContext: AgentContext,
-    credentialOffer: string
+    credentialOffer: string,
+    options?: OpenId4VciResolveIssuerMetadataOptions
   ): Promise<OpenId4VciResolvedCredentialOffer> {
     const client = this.getClient(agentContext)
 
     const credentialOfferObject = await client.resolveCredentialOffer(credentialOffer)
-    const metadata = await client.resolveIssuerMetadata(credentialOfferObject.credential_issuer)
+    const metadata = await client.resolveIssuerMetadata(credentialOfferObject.credential_issuer, {
+      signedMetadata: options?.signedMetadata ?? this.config.signedMetadata,
+    })
     this.logger.debug('fetched credential offer and issuer metadata', { metadata, credentialOfferObject })
 
     const credentialConfigurationsSupported = getOfferedCredentials(
@@ -167,13 +182,26 @@ export class OpenId4VciHolderService {
       authorizationServer
     )
 
-    // TODO: should we allow key reuse between dpop and wallet attestation?
     const isDpopSupported = oauth2Client.isDpopSupported({ authorizationServerMetadata })
+
+    // draft 09 §5.2: to bind the whole authorization-code interaction to the client instance key, use it
+    // as the DPoP key. At the authorization request the standard client attestation method is used (there
+    // is no combined proof at PAR/authorization requests); committing the instance key here (as `dpop_jkt`)
+    // lets the token endpoint use the DPoP-bound method with the same key.
+    const dpopBoundClientAttestationKey = isDpopSupported.supported
+      ? this.getDpopBoundClientAttestationKey(authCodeFlowOptions.walletAttestationJwt, authorizationServerMetadata)
+      : undefined
     const dpop = isDpopSupported.supported
-      ? await this.getDpopOptions(agentContext, {
+      ? await getDpopOptions(agentContext, {
+          jwk: dpopBoundClientAttestationKey,
           dpopSigningAlgValuesSupported: isDpopSupported.dpopSigningAlgValuesSupported,
         })
       : undefined
+
+    // We generate the pkce code verifier ourselves, as it's not returned by `initiateAuthorization` for the
+    // presentation during issuance flow, but it is still needed when exchanging the authorization code.
+    const kms = agentContext.resolve(Kms.KeyManagementApi)
+    const pkceCodeVerifier = TypedArrayEncoder.toBase64Url(kms.randomBytes({ length: 32 }))
 
     const authorizationResult = await client.initiateAuthorization({
       clientId,
@@ -182,18 +210,25 @@ export class OpenId4VciHolderService {
       scope: scope.join(' '),
       redirectUri,
       dpop,
+      pkceCodeVerifier,
     })
+
+    if (authorizationResult.authorizationFlow === AuthorizationFlow.InteractiveAuthorizationOpenid4vp) {
+      throw new CredoError('Interactive Authorization is not supported yet.')
+    }
 
     if (authorizationResult.authorizationFlow === AuthorizationFlow.PresentationDuringIssuance) {
       return {
         authorizationFlow: AuthorizationFlow.PresentationDuringIssuance,
         openid4vpRequestUrl: authorizationResult.openid4vpRequestUrl,
         authSession: authorizationResult.authSession,
-        // FIXME: return dpop result from this endpoint (dpop nonce)
+        // Only used if the authorization server supports pkce
+        codeVerifier: authorizationServerMetadata.code_challenge_methods_supported ? pkceCodeVerifier : undefined,
         dpop: dpop
           ? {
               alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
               jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+              nonce: authorizationResult.dpop?.nonce,
             }
           : undefined,
       }
@@ -204,11 +239,11 @@ export class OpenId4VciHolderService {
       authorizationFlow: AuthorizationFlow.Oauth2Redirect,
       codeVerifier: authorizationResult.pkce?.codeVerifier,
       authorizationRequestUrl: authorizationResult.authorizationRequestUrl,
-      // FIXME: return dpop result from this endpoint (dpop nonce)
       dpop: dpop
         ? {
             alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
             jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+            nonce: authorizationResult.dpop?.nonce,
           }
         : undefined,
     }
@@ -219,7 +254,7 @@ export class OpenId4VciHolderService {
     await client.sendNotification({
       accessToken: options.accessToken,
       dpop: options.dpop
-        ? await this.getDpopOptions(agentContext, {
+        ? await getDpopOptions(agentContext, {
             ...options.dpop,
             dpopSigningAlgValuesSupported: [options.dpop.alg],
           })
@@ -230,74 +265,6 @@ export class OpenId4VciHolderService {
         notificationId: options.notificationId,
       },
     })
-  }
-
-  private async getDpopOptions(
-    agentContext: AgentContext,
-    {
-      jwk,
-      dpopSigningAlgValuesSupported,
-      nonce,
-    }: { dpopSigningAlgValuesSupported: string[]; jwk?: Kms.PublicJwk; nonce?: string }
-  ): Promise<RequestDpopOptions> {
-    const kms = agentContext.resolve(Kms.KeyManagementApi)
-
-    if (jwk) {
-      const alg = dpopSigningAlgValuesSupported.find((alg) =>
-        jwk.supportedSignatureAlgorithms.includes(alg as Kms.KnownJwaSignatureAlgorithm)
-      )
-
-      if (!alg) {
-        throw new CredoError(
-          `No supported dpop signature algorithms found in dpop_signing_alg_values_supported '${dpopSigningAlgValuesSupported.join(
-            ', '
-          )}' matching jwk ${jwk.jwkTypeHumanDescription}`
-        )
-      }
-
-      return {
-        signer: {
-          method: 'jwk',
-          alg,
-          publicJwk: jwk.toJson() as Jwk,
-        },
-        nonce,
-      }
-    }
-
-    const alg = dpopSigningAlgValuesSupported.find((algorithm): algorithm is Kms.KnownJwaSignatureAlgorithm => {
-      try {
-        Kms.PublicJwk.supportedPublicJwkClassForSignatureAlgorithm(algorithm as Kms.KnownJwaSignatureAlgorithm)
-
-        // TODO: we should allow providing allowed backends to OID4VC API so you can limit which
-        // KMS backends can be used for DPOP
-        const supportedBackends = kms.supportedBackendsForOperation({
-          operation: 'sign',
-          algorithm: algorithm as Kms.KnownJwaSignatureAlgorithm,
-        })
-        return supportedBackends.length > 0
-      } catch {
-        return false
-      }
-    })
-
-    if (!alg) {
-      throw new CredoError(
-        `No supported dpop signature algorithms found in dpop_signing_alg_values_supported '${dpopSigningAlgValuesSupported.join(
-          ', '
-        )}'`
-      )
-    }
-
-    const key = await kms.createKeyForSignatureAlgorithm({ algorithm: alg })
-    return {
-      signer: {
-        method: 'jwk',
-        alg,
-        publicJwk: key.publicJwk as Jwk,
-      },
-      nonce,
-    }
   }
 
   public async retrieveAuthorizationCodeUsingPresentation(
@@ -311,7 +278,7 @@ export class OpenId4VciHolderService {
       clientAttestation: options.walletAttestationJwt,
     })
     const dpop = options.dpop
-      ? await this.getDpopOptions(agentContext, {
+      ? await getDpopOptions(agentContext, {
           ...options.dpop,
           dpopSigningAlgValuesSupported: [options.dpop.alg],
         })
@@ -330,9 +297,9 @@ export class OpenId4VciHolderService {
       authorizationCode: authorizationChallengeResponse.authorization_code,
       dpop: dpop
         ? {
-            ...dpopResult,
             alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
             jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+            nonce: dpopResult?.nonce,
           }
         : undefined,
     }
@@ -374,10 +341,6 @@ export class OpenId4VciHolderService {
     dpop?: OpenId4VciDpopRequestOptions
   }> {
     const { metadata, credentialOfferPayload } = options.resolvedCredentialOffer
-    const client = this.getClient(agentContext, {
-      clientAttestation: options.walletAttestationJwt,
-      clientId: 'clientId' in options ? options.clientId : undefined,
-    })
     const oauth2Client = this.getOauth2Client(agentContext)
 
     const authorizationServer = options.code
@@ -392,19 +355,52 @@ export class OpenId4VciHolderService {
       authorizationServerMetadata,
     })
 
-    const dpop = options.dpop
-      ? await this.getDpopOptions(agentContext, {
-          ...options.dpop,
-          dpopSigningAlgValuesSupported: [options.dpop.alg],
-        })
-      : // We should be careful about this case. It could just be the user didn't correctly
-        // provide the DPoP from the auth response. In which case different DPoP will be used
-        // However it might be that they only use DPoP for the token request (esp in pre-auth case)
-        isDpopSupported.supported
-        ? await this.getDpopOptions(agentContext, {
+    // draft 09 §5.2: when the authorization server supports the DPoP-bound client attestation method, the
+    // client instance key is used as the DPoP key so a single DPoP proof serves as both the DPoP proof and
+    // the client attestation pop. This applies to the pre-authorized flow (no pre-existing DPoP binding)
+    // and to the authorization-code flow when the DPoP key committed at the authorization request
+    // (`options.dpop`) is the client instance key.
+    const instanceKey = isDpopSupported.supported
+      ? this.getDpopBoundClientAttestationKey(options.walletAttestationJwt, authorizationServerMetadata)
+      : undefined
+    const dpopBoundClientAttestationKey =
+      instanceKey && (!options.dpop || options.dpop.jwk.fingerprint === instanceKey.fingerprint)
+        ? instanceKey
+        : undefined
+
+    const client = this.getClient(agentContext, {
+      clientAttestation: options.walletAttestationJwt,
+      clientId: 'clientId' in options ? options.clientId : undefined,
+      dpopBoundClientAttestation: dpopBoundClientAttestationKey !== undefined,
+    })
+
+    // For the DPoP-bound method the single DPoP proof is created by the client authentication callback
+    // (`clientAuthenticationClientAttestationJwtDpop`), so we must NOT also create a standalone DPoP proof
+    // for the request. We only derive the instance-key signer to return the DPoP binding for subsequent
+    // (resource) requests.
+    const dpopBoundSigner =
+      dpopBoundClientAttestationKey && isDpopSupported.supported
+        ? await getDpopOptions(agentContext, {
+            jwk: dpopBoundClientAttestationKey,
             dpopSigningAlgValuesSupported: isDpopSupported.dpopSigningAlgValuesSupported,
           })
         : undefined
+
+    const dpop = dpopBoundClientAttestationKey
+      ? undefined
+      : options.dpop
+        ? await getDpopOptions(agentContext, {
+            ...options.dpop,
+            dpopSigningAlgValuesSupported: [options.dpop.alg],
+          })
+        : // We should be careful about this case. It could just be the user didn't correctly
+          // provide the DPoP from the auth response. In which case different DPoP will be used
+          // However it might be that they only use DPoP for the token request (esp in pre-auth case)
+          isDpopSupported.supported
+          ? await getDpopOptions(agentContext, {
+              dpopSigningAlgValuesSupported: isDpopSupported.dpopSigningAlgValuesSupported,
+            })
+          : undefined
 
     const result = options.code
       ? await client.retrieveAuthorizationCodeAccessTokenFromOffer({
@@ -424,13 +420,20 @@ export class OpenId4VciHolderService {
 
     return {
       ...result,
-      dpop: dpop
+      // For the DPoP-bound method the binding is the client instance key (the DPoP proof is created by the
+      // client authentication callback, so `result.dpop` is undefined).
+      dpop: dpopBoundSigner
         ? {
-            ...result.dpop,
-            alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
-            jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+            alg: dpopBoundSigner.signer.alg as Kms.KnownJwaSignatureAlgorithm,
+            jwk: Kms.PublicJwk.fromUnknown(dpopBoundSigner.signer.publicJwk),
           }
-        : undefined,
+        : dpop
+          ? {
+              alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
+              jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+              nonce: result.dpop?.nonce,
+            }
+          : undefined,
     }
   }
 
@@ -438,8 +441,7 @@ export class OpenId4VciHolderService {
     agentContext: AgentContext,
     options: OpenId4VciTokenRefreshOptions
   ): Promise<
-    // FIXME: export type in oid4vc library
-    Omit<Awaited<ReturnType<Oauth2Client['retrieveRefreshTokenAccessToken']>>, 'dpop'> & {
+    Omit<RetrieveAccessTokenReturn, 'dpop'> & {
       dpop?: OpenId4VciDpopRequestOptions
     }
   > {
@@ -449,7 +451,7 @@ export class OpenId4VciHolderService {
     })
 
     const dpop = options.dpop
-      ? await this.getDpopOptions(agentContext, {
+      ? await getDpopOptions(agentContext, {
           ...options.dpop,
           dpopSigningAlgValuesSupported: [options.dpop.alg],
         })
@@ -471,9 +473,9 @@ export class OpenId4VciHolderService {
       ...result,
       dpop: dpop
         ? {
-            ...result.dpop,
             alg: dpop.signer.alg as Kms.KnownJwaSignatureAlgorithm,
             jwk: Kms.PublicJwk.fromUnknown(dpop.signer.publicJwk),
+            nonce: result.dpop?.nonce,
           }
         : undefined,
     }
@@ -539,7 +541,7 @@ export class OpenId4VciHolderService {
             accessToken: options.accessToken,
             credentialConfigurationId: credentialConfigurationsToRequest[0][0],
             dpop: options.dpop
-              ? await this.getDpopOptions(agentContext, {
+              ? await getDpopOptions(agentContext, {
                   ...options.dpop,
                   nonce: dpopNonce,
                   dpopSigningAlgValuesSupported: [options.dpop.alg],
@@ -561,7 +563,8 @@ export class OpenId4VciHolderService {
     for (const [offeredCredentialId, offeredCredentialConfiguration] of credentialConfigurationsToRequest) {
       const { proofs, jwkThumbprintKmsKeyIdMapping } = await this.getCredentialRequestOptions(agentContext, {
         allowedProofOfPossessionAlgorithms:
-          allowedProofOfPossessionSignatureAlgorithms ?? getSupportedJwaSignatureAlgorithms(agentContext),
+          allowedProofOfPossessionSignatureAlgorithms ??
+          agentContext.resolve(Kms.KeyManagementApi).supportedJwaSignatureAlgorithms(),
         metadata,
         offeredCredential: {
           id: offeredCredentialId,
@@ -593,7 +596,7 @@ export class OpenId4VciHolderService {
         accessToken: options.accessToken,
         credentialConfigurationId: offeredCredentialId,
         dpop: options.dpop
-          ? await this.getDpopOptions(agentContext, {
+          ? await getDpopOptions(agentContext, {
               ...options.dpop,
               nonce: dpopNonce,
               dpopSigningAlgValuesSupported: [options.dpop.alg],
@@ -686,7 +689,7 @@ export class OpenId4VciHolderService {
       accessToken,
       transactionId,
       dpop: options.dpop
-        ? await this.getDpopOptions(agentContext, {
+        ? await getDpopOptions(agentContext, {
             ...options.dpop,
             nonce: dpopNonce,
             dpopSigningAlgValuesSupported: [options.dpop.alg],
@@ -767,7 +770,7 @@ export class OpenId4VciHolderService {
     const dids = agentContext.resolve(DidsApi)
     const { allowedProofOfPossessionAlgorithms, offeredCredential } = options
     const { configuration, id: configurationId } = offeredCredential
-    const supportedJwaSignatureAlgorithms = getSupportedJwaSignatureAlgorithms(agentContext)
+    const supportedJwaSignatureAlgorithms = agentContext.resolve(Kms.KeyManagementApi).supportedJwaSignatureAlgorithms()
 
     const possibleProofOfPossessionSignatureAlgorithms = allowedProofOfPossessionAlgorithms
       ? allowedProofOfPossessionAlgorithms.filter((algorithm) => supportedJwaSignatureAlgorithms.includes(algorithm))
@@ -873,12 +876,13 @@ export class OpenId4VciHolderService {
 
       // This will/should leverage the caching, so it's ok to resolve the did here
       const keys = await Promise.all(
-        credentialBinding.didUrls.map(async (didUrl, index) =>
-          index === 0
-            ? // We already fetched the first did
-              { jwk: firstKey, didUrl: firstDid.didUrl }
-            : { jwk: (await dids.resolveVerificationMethodFromCreatedDidRecord(didUrl)).publicJwk, didUrl }
-        )
+        credentialBinding.didUrls.map(async (didUrl, index) => {
+          // We already fetched the first did
+          if (index === 0) return { jwk: firstKey, didUrl }
+
+          const { publicJwk } = await dids.resolveVerificationMethodFromCreatedDidRecord(didUrl)
+          return { jwk: publicJwk, didUrl }
+        })
       )
       if (!keys.every((key) => Kms.asymmetricJwkKeyTypeMatches(key.jwk.toJson(), firstKey.toJson()))) {
         throw new CredoError('Expected all did urls to point to the same key type')
@@ -979,8 +983,10 @@ export class OpenId4VciHolderService {
                   issuerMetadata: options.metadata,
                   signer: {
                     method: 'jwk',
-                    publicJwk: jwk.toJson() as Jwk,
+                    // There's no need to include the kid in the jwk sent to the issuer, we only store the key id internally
+                    publicJwk: jwk.toJson({ includeKid: false }) as Jwk,
                     alg: algorithm,
+                    kid: jwk.hasKeyId ? jwk.keyId : undefined,
                   },
                   nonce: options.cNonce,
                   clientId: options.clientId,
@@ -1260,9 +1266,12 @@ export class OpenId4VciHolderService {
         )
 
         if (!verificationResults.every((result) => result.isValid)) {
-          agentContext.config.logger.error('Failed to validate credential(s)', { verificationResults })
+          const resultsWithoutCredentials = verificationResults.map(({ sdJwtVc, ...rest }) => rest)
+          agentContext.config.logger.error('Failed to validate credential(s)', {
+            verificationResults: resultsWithoutCredentials,
+          })
           throw new CredoError(
-            `Failed to validate sd-jwt-vc credentials. Results = ${JSON.stringify(verificationResults, replaceError)}`
+            `Failed to validate sd-jwt-vc credentials. Results = ${JSON.stringify(resultsWithoutCredentials, replaceError)}`
           )
         }
 
@@ -1469,13 +1478,17 @@ export class OpenId4VciHolderService {
 
   private getCallbacks(
     agentContext: AgentContext,
-    { clientAttestation, clientId }: { clientAttestation?: string; clientId?: string } = {}
+    {
+      clientAttestation,
+      clientId,
+      dpopBoundClientAttestation,
+    }: { clientAttestation?: string; clientId?: string; dpopBoundClientAttestation?: boolean } = {}
   ) {
     const callbacks = getOid4vcCallbacks(agentContext)
 
     return {
       ...callbacks,
-      clientAuthentication: (options) => {
+      clientAuthentication: async (options) => {
         const { authorizationServerMetadata, url, body } = options
         const oauth2Client = this.getOauth2Client(agentContext)
         const clientAttestationSupported = oauth2Client.isClientAttestationSupported({
@@ -1484,8 +1497,27 @@ export class OpenId4VciHolderService {
 
         // Client attestations
         if (clientAttestation && clientAttestationSupported) {
+          // Draft 09: when the authorization server exposes a challenge endpoint, the client MUST include
+          // a fresh challenge in the client attestation pop jwt. Fetch one proactively (covers PAR, token
+          // and authorization challenge). On the token endpoint the library additionally auto-retries the
+          // `use_attestation_challenge` error with a server-provided challenge, which takes precedence.
+          const challenge = authorizationServerMetadata.challenge_endpoint
+            ? (await requestClientAttestationChallenge({ authorizationServerMetadata, callbacks })).challenge
+            : undefined
+
+          // Draft 09 §5.2 DPoP-bound method: at the token endpoint a single DPoP proof (signed with the
+          // client instance key) serves as both the DPoP proof and the client attestation pop jwt.
+          if (dpopBoundClientAttestation && url === authorizationServerMetadata.token_endpoint) {
+            return clientAuthenticationClientAttestationJwtDpop({
+              clientAttestationJwt: clientAttestation,
+              challenge,
+              callbacks,
+            })(options)
+          }
+
           return clientAuthenticationClientAttestationJwt({
             clientAttestationJwt: clientAttestation,
+            challenge,
             callbacks,
           })(options)
         }
@@ -1530,15 +1562,46 @@ export class OpenId4VciHolderService {
     } satisfies Partial<CallbackContext>
   }
 
-  private getClient(agentContext: AgentContext, options: { clientAttestation?: string; clientId?: string } = {}) {
+  private getClient(
+    agentContext: AgentContext,
+    options: { clientAttestation?: string; clientId?: string; dpopBoundClientAttestation?: boolean } = {}
+  ) {
     return new Openid4vciClient({
       callbacks: this.getCallbacks(agentContext, options),
     })
   }
 
-  private getOauth2Client(agentContext: AgentContext, options?: { clientAttestation?: string; clientId?: string }) {
+  private getOauth2Client(
+    agentContext: AgentContext,
+    options?: { clientAttestation?: string; clientId?: string; dpopBoundClientAttestation?: boolean }
+  ) {
     return new Oauth2Client({
       callbacks: options ? this.getCallbacks(agentContext, options) : getOid4vcCallbacks(agentContext),
     })
+  }
+
+  /**
+   * Determines whether the DPoP-bound client attestation method (`attest_jwt_client_auth_dpop`, draft 09
+   * §5.2) should be used, and returns the client instance key (the `cnf.jwk` of the client attestation)
+   * to be used as the DPoP key. Returns `undefined` when the method is not applicable.
+   */
+  private getDpopBoundClientAttestationKey(
+    clientAttestationJwt: string | undefined,
+    authorizationServerMetadata: { token_endpoint_auth_methods_supported?: string[] }
+  ): Kms.PublicJwk | undefined {
+    if (!clientAttestationJwt) return undefined
+    if (
+      !authorizationServerMetadata.token_endpoint_auth_methods_supported?.includes(
+        SupportedClientAuthenticationMethod.ClientAttestationJwtDpop
+      )
+    ) {
+      return undefined
+    }
+
+    const { payload } = decodeJwt({ jwt: clientAttestationJwt })
+    const cnfJwk = (payload.cnf as { jwk?: Record<string, unknown> } | undefined)?.jwk
+    if (!cnfJwk) return undefined
+
+    return Kms.PublicJwk.fromUnknown(cnfJwk)
   }
 }

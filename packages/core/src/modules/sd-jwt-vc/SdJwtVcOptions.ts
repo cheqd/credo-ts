@@ -1,7 +1,8 @@
 import type { SdJwtVcPayload } from '@sd-jwt/sd-jwt-vc'
+import type { TrustedIssuer } from '../../agent/TrustedIssuersForVerification'
 import type { HashName } from '../../crypto'
 import { PublicJwk } from '../kms'
-import type { EncodedX509Certificate, X509Certificate } from '../x509'
+import type { EncodedX509Certificate, X509Certificate, X509VerificationTrustedCertificates } from '../x509'
 import { SdJwtVcRecord } from './repository'
 import type { SdJwtVc } from './SdJwtVcService'
 
@@ -13,9 +14,12 @@ export type { SdJwtVcPayload }
 export type SdJwtVcHeader = Record<string, unknown>
 
 export interface IDisclosureFrame {
-  _sd?: string[]
+  /**
+   * The claims that are selectively disclosable: property names in an object, element positions in an array.
+   */
+  _sd?: Array<string | number>
   _sd_decoy?: number
-  [x: string]: string[] | number | IDisclosureFrame | undefined
+  [x: string]: Array<string | number> | number | IDisclosureFrame | undefined
 }
 
 export interface IPresentationFrame {
@@ -51,15 +55,7 @@ export interface SdJwtVcIssuerX5c {
   x5c: X509Certificate[]
 
   /**
-   * The issuer of the SD-JWT VC.
-   *
-   * NOTE: in the latest draft of SD-JWT VC the issuer field is optional when using an X509 certificates
-   * to sign the SD-JWT VC.
-   *
-   * Since it's not clear what the iss value should be Credo will likely require
-   * the value to be undefined in a future version, but for now if the issuer value
-   * is defined it MUST match an SAN URI or DNS entry in the leaf certificate, mimicking
-   * previous behavior.
+   * The issuer of the SD-JWT VC. Optional when signing with X509 certificates.
    */
   issuer?: string
 }
@@ -72,7 +68,11 @@ export type SdJwtVcHolderBinding = SdJwtVcHolderDidBinding | SdJwtVcHolderJwkBin
 export type SdJwtVcIssuer = SdJwtVcIssuerDid | SdJwtVcIssuerX5c
 
 export interface SdJwtVcSignOptions<Payload extends SdJwtVcPayload = SdJwtVcPayload> {
-  payload: Payload
+  /**
+   * If `iat` is omitted from the payload, the current time will be used.
+   * If `iat` is explicitly set to `null`, no `iat` claim will be included in the issued credential.
+   */
+  payload: Omit<Payload, 'iat'> & { iat?: number | null }
 
   /**
    * If holder is not provided, we don't bind the SD-JWT VC to a key (so bearer VC)
@@ -82,9 +82,15 @@ export interface SdJwtVcSignOptions<Payload extends SdJwtVcPayload = SdJwtVcPayl
   disclosureFrame?: IDisclosureFrame
 
   /**
-   * Default of sha-256 will be used if not provided
+   * The hashing algorithm used for the disclosure digests, and placed in the
+   * `_sd_alg` claim of the SD-JWT VC.
+   *
+   * `sha-1` is not supported, as SD-JWT VC requires a hash algorithm that is
+   * considered secure at the time of issuance.
+   *
+   * @default 'sha-256'
    */
-  hashingAlgorithm?: HashName
+  hashingAlgorithm?: Exclude<HashName, 'sha-1'>
 
   /**
    * The header 'typ' to use for the SD-JWT VC. vc+sd-jwt is supported
@@ -158,13 +164,33 @@ export type SdJwtVcVerifyOptions = {
 
   /**
    * Whether to verify the status of the credential. If set to false and the credential
-   * has a status, it will not be fetched and verified.
+   * has a status, it will not be checked and the status list will not be fetched.
    *
    * @default true
+   * @deprecated use `disableStatusValidation`
    */
   verifyCredentialStatus?: boolean
 
-  trustedCertificates?: EncodedX509Certificate[]
+  /**
+   * Whether to verify the status of the credential. If set to true and the credential
+   * has a status, it will not be checked and the status list will not be fetched.
+   *
+   * @default false
+   */
+  disableStatusValidation?: boolean
+
+  /**
+   * Trusted certificates for the verification.
+   *
+   * @deprecated use `trustedIssuers` instead.
+   */
+  trustedCertificates?: EncodedX509Certificate[] | X509VerificationTrustedCertificates[]
+
+  /**
+   * Trusted issuers for the verification. Only entries whose `method` matches the credential signer
+   * method are considered (x509 entries gate x5c-signed credentials, did entries gate did-signed ones).
+   */
+  trustedIssuers?: TrustedIssuer[]
 
   /**
    * Date that should be used as the current time. If not provided, current time will be used.

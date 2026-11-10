@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [9f4278b]
+- Updated dependencies [f127ff5]
+- Updated dependencies [5cfcadb]
+- Updated dependencies [84dfcf4]
+- Updated dependencies [b75467c]
+- Updated dependencies [e80900a]
+- Updated dependencies [8ded8d2]
+- Updated dependencies [fd5016d]
+- Updated dependencies [d45aec0]
+- Updated dependencies [5cfcadb]
+- Updated dependencies [097c831]
+- Updated dependencies [20d6ab1]
+- Updated dependencies [bc4638e]
+- Updated dependencies [bc4638e]
+- Updated dependencies [bc4638e]
+- Updated dependencies [907f12f]
+- Updated dependencies [bc4638e]
+- Updated dependencies [96dc69b]
+- Updated dependencies [7dfafeb]
+- Updated dependencies [3a3eb03]
+- Updated dependencies [23c354e]
+- Updated dependencies [907cc54]
+- Updated dependencies [339f4cc]
+- Updated dependencies [bc4638e]
+- Updated dependencies [5cfcadb]
+- Updated dependencies [f127ff5]
+- Updated dependencies [cfe86fa]
+- Updated dependencies [e97c18b]
+- Updated dependencies [121dd14]
+- Updated dependencies [b75467c]
+- Updated dependencies [cfe86fa]
+- Updated dependencies [0a58888]
+- Updated dependencies [1e2088f]
+  - @credo-ts/core@0.7.1
+  - @credo-ts/anoncreds@0.7.1
+
+## 0.7.0
+
+### Minor Changes
+
+- cc65c27: - Removed buffer dependency and replaced with `@scure/base` for base-x encoding/decoding
+
+  - Updated DIDComm attachments to use base64url, not base64
+  - Updated tests to make sure urland base64 encoded items use base64url
+  - Added `fromBase64Url` to `TypedArrayEncoder` and `JsonEncoder`
+
+  Breaking changes:
+
+  1. `TypedArrayEncoder.fromBase64` does not support base64url anymore, please use `TypedArrayEncoder.fromBase64Url` for that. Same for `JsonEncoder`
+  2. `TypedArrayEncoder.fromString` has been replaced by `TypedArrayEncoder.fromUtf8String` to be consistent with `TypedArrayEncoder.toUtf8String`
+  3. Every place where we accepted `Buffer` as input we now only support `Uint8Array` as input
+  4. `TypedArrayEncoder.equals` is now constant-time, however I would still hesitate to use it for any private crypto operation 5. Removed `Uint8ArrayBuffer` type, not used anymore
+
+### Patch Changes
+
+- fea8d89: Updated indy-vdr to 0.3.0 which uses koffi instead of ffi-napi
+- Updated dependencies [5056b97]
+- Updated dependencies [b75f0bf]
+- Updated dependencies [e0c829e]
+- Updated dependencies [120cee8]
+- Updated dependencies [c1ab9be]
+- Updated dependencies [10a3ce5]
+- Updated dependencies [cc65c27]
+- Updated dependencies [1a652e3]
+- Updated dependencies [b7aec4e]
+  - @credo-ts/core@0.7.0
+  - @credo-ts/anoncreds@0.7.0
+
 ## 0.6.3
 
 ### Patch Changes

@@ -7,9 +7,12 @@ import {
   TypedArrayEncoder,
   VarintEncoder,
 } from '../../../../utils'
-import { Buffer } from '../../../../utils/buffer'
+import { Ed25519PublicJwk } from '../../../kms'
 import { DidDocument } from '../../domain'
+import { getPublicJwkFromVerificationMethod } from '../../domain/key-type'
 import { parseDid } from '../../domain/parse'
+import type { VerificationMethod } from '../../domain/verificationMethod'
+import { DidKey } from '../key/DidKey'
 
 const LONG_RE = /^did:peer:4(z[1-9a-km-zA-HJ-NP-Z]{46}):(z[1-9a-km-zA-HJ-NP-Z]{6,})$/
 const SHORT_RE = /^did:peer:4(z[1-9a-km-zA-HJ-NP-Z]{46})$/
@@ -20,7 +23,7 @@ export const isLongFormDidPeer4 = (did: string) => LONG_RE.test(did)
 
 const hashEncodedDocument = (encodedDocument: string) =>
   MultiBaseEncoder.encode(
-    MultiHashEncoder.encode(TypedArrayEncoder.fromString(encodedDocument), 'sha-256'),
+    MultiHashEncoder.encode(TypedArrayEncoder.fromUtf8String(encodedDocument), 'sha-256'),
     'base58btc'
   )
 
@@ -29,6 +32,65 @@ export function getAlternativeDidsForNumAlgo4Did(did: string) {
   if (!match) return
   const [, hash] = match
   return [`did:peer:4${hash}`]
+}
+
+/** Short form for a did:peer:4 DID (long or short), or undefined if not num-algo 4. */
+export function getDidPeer4ShortFormForEquivalence(did: string): string | undefined {
+  if (isShortFormDidPeer4(did)) return did
+  if (isLongFormDidPeer4(did)) return getAlternativeDidsForNumAlgo4Did(did)?.[0]
+  return undefined
+}
+
+/** True when both strings are the same did:peer:4 identity (short vs long encodings). */
+export function areEquivalentDidPeer4Forms(a: string, b: string): boolean {
+  if (a === b) return true
+  const shortA = getDidPeer4ShortFormForEquivalence(a)
+  const shortB = getDidPeer4ShortFormForEquivalence(b)
+  return Boolean(shortA && shortB && shortA === shortB)
+}
+
+function collectVerificationMethodsFromPurpose(
+  doc: DidDocument,
+  refs: Array<string | VerificationMethod> | undefined
+): VerificationMethod[] {
+  const methods: VerificationMethod[] = []
+  for (const ref of refs ?? []) {
+    try {
+      methods.push(typeof ref === 'string' ? doc.dereferenceVerificationMethod(ref) : ref)
+    } catch {
+      // ignore broken refs
+    }
+  }
+  return methods
+}
+
+/**
+ * Ed25519 `did:key` values derived from a long-form `did:peer:4` document (authentication + assertion).
+ * Lets a mediator match forward `next` (often did:peer:4) to CM2 keylist entries registered as did:key.
+ */
+export function getEd25519DidKeysFromLongFormDidPeer4(did: string): string[] {
+  if (!isLongFormDidPeer4(did)) {
+    return []
+  }
+  try {
+    const doc = didToNumAlgo4DidDocument(did)
+    const vms = [
+      ...collectVerificationMethodsFromPurpose(doc, doc.authentication),
+      ...collectVerificationMethodsFromPurpose(doc, doc.assertionMethod),
+    ]
+    const didKeys = new Set<string>()
+    for (const vm of vms) {
+      try {
+        const jwk = getPublicJwkFromVerificationMethod(vm)
+        if (jwk.is(Ed25519PublicJwk)) {
+          didKeys.add(new DidKey(jwk).did)
+        }
+      } catch {}
+    }
+    return [...didKeys]
+  } catch {
+    return []
+  }
 }
 
 export function didToNumAlgo4DidDocument(did: string) {
@@ -44,11 +106,11 @@ export function didToNumAlgo4DidDocument(did: string) {
   }
 
   const { data } = MultiBaseEncoder.decode(encodedDocument)
-  const [multiCodecValue] = VarintEncoder.decode(data.subarray(0, 2))
+  const [multiCodecValue, multiCodecByteLength] = VarintEncoder.decode(data)
   if (multiCodecValue !== JSON_MULTICODEC_VARINT) {
     throw new CredoError('Not a JSON multicodec data')
   }
-  const didDocumentJson = JsonEncoder.fromBuffer(data.subarray(2))
+  const didDocumentJson = JsonEncoder.fromUint8Array(data.subarray(multiCodecByteLength))
 
   didDocumentJson.id = parsed.did
   didDocumentJson.alsoKnownAs = [parsed.did.slice(0, did.lastIndexOf(':'))]
@@ -95,9 +157,9 @@ export function didDocumentToNumAlgo4Did(didDocument: DidDocument) {
   deleteControllerIfPresent(didDocumentJson.capabilityInvocation)
 
   // Construct encoded document by prefixing did document with multicodec prefix for JSON
-  const buffer = Buffer.concat([
+  const buffer = TypedArrayEncoder.concat([
     VarintEncoder.encode(JSON_MULTICODEC_VARINT),
-    TypedArrayEncoder.fromString(JSON.stringify(didDocumentJson)),
+    TypedArrayEncoder.fromUtf8String(JSON.stringify(didDocumentJson)),
   ])
 
   const encodedDocument = MultiBaseEncoder.encode(buffer, 'base58btc')

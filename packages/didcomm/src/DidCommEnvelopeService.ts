@@ -11,12 +11,11 @@ import {
   TypedArrayEncoder,
 } from '@credo-ts/core'
 import type { DidCommMessage } from './DidCommMessage'
-import { DidCommModuleConfig } from './DidCommModuleConfig'
-import { getResolvedDidcommServiceWithSigningKeyId } from './modules/connections/services/helpers'
+import { getResolvedDidcommServiceWithSigningKeyId, toX25519 } from './modules/connections/services/helpers'
 import { DidCommOutOfBandRole } from './modules/oob/domain/DidCommOutOfBandRole'
 import { DidCommOutOfBandRepository } from './modules/oob/repository/DidCommOutOfBandRepository'
 import { DidCommOutOfBandRecordMetadataKeys } from './modules/oob/repository/outOfBandRecordMetadataTypes'
-import { DidCommForwardMessage } from './modules/routing/messages/DidCommForwardMessage'
+import { DidCommForwardMessage } from './modules/routing/protocol/v1/messages/DidCommForwardMessage'
 import { DidCommMediatorRoutingRepository } from './modules/routing/repository/DidCommMediatorRoutingRepository'
 import { DidCommDocumentService } from './services/DidCommDocumentService'
 import type { DidCommEncryptedMessage, DidCommPlaintextMessage } from './types'
@@ -25,6 +24,8 @@ export interface EnvelopeKeys {
   recipientKeys: Kms.PublicJwk<Kms.Ed25519PublicJwk>[]
   routingKeys: Kms.PublicJwk<Kms.Ed25519PublicJwk>[]
   senderKey: Kms.PublicJwk<Kms.Ed25519PublicJwk> | null
+  /** DID URL of the sender key; used as skid in DIDComm v2 so recipient can resolve it */
+  senderKeySkid?: string
 }
 
 @injectable()
@@ -64,30 +65,34 @@ export class DidCommEnvelopeService {
       let encryptedSender: string | undefined
 
       if (senderKey) {
+        // DIDComm v1 uses Ed25519 keys but encryption happens with X25519 keys.
+        const recipientX25519Jwk = toX25519(recipientKey).toJson()
+
         // Encrypt the sender
         const { encrypted } = await kms.encrypt({
           key: {
             keyAgreement: {
               algorithm: 'ECDH-HSALSA20',
-              // DIDComm v1 uses Ed25519 keys but encryption happens with X25519 keys
-              externalPublicJwk: recipientKey.convertTo(Kms.X25519PublicJwk).toJson(),
+              externalPublicJwk: recipientX25519Jwk,
             },
           },
           encryption: {
             algorithm: 'XSALSA20-POLY1305',
           },
-          data: TypedArrayEncoder.fromString(TypedArrayEncoder.toBase58(senderKey.publicKey.publicKey)),
+          data: TypedArrayEncoder.fromUtf8String(TypedArrayEncoder.toBase58(senderKey.publicKey.publicKey)),
         })
 
-        encryptedSender = TypedArrayEncoder.toBase64URL(encrypted)
+        encryptedSender = TypedArrayEncoder.toBase64Url(encrypted)
       }
 
       // Encrypt the key
+      const recipientX25519JwkForKey = toX25519(recipientKey).toJson()
+
       const { encrypted, iv } = await kms.encrypt({
         key: {
           keyAgreement: {
             algorithm: 'ECDH-HSALSA20',
-            externalPublicJwk: recipientKey.convertTo(Kms.X25519PublicJwk).toJson(),
+            externalPublicJwk: recipientX25519JwkForKey,
 
             // Sender key only needed for Authcrypt
             keyId: senderKey?.keyId,
@@ -100,16 +105,16 @@ export class DidCommEnvelopeService {
       })
 
       recipients.push({
-        encrypted_key: TypedArrayEncoder.toBase64URL(encrypted),
+        encrypted_key: TypedArrayEncoder.toBase64Url(encrypted),
         header: {
           kid: TypedArrayEncoder.toBase58(recipientKey.publicKey.publicKey),
-          iv: iv ? TypedArrayEncoder.toBase64URL(iv) : undefined,
+          iv: iv ? TypedArrayEncoder.toBase64Url(iv) : undefined,
           sender: encryptedSender,
         },
       })
     }
 
-    const protectedString = JsonEncoder.toBase64URL({
+    const protectedString = JsonEncoder.toBase64Url({
       enc: 'xchacha20poly1305_ietf',
       typ: 'JWM/1.0',
       alg: senderKey ? 'Authcrypt' : 'Anoncrypt',
@@ -120,13 +125,13 @@ export class DidCommEnvelopeService {
     const { encrypted, iv, tag } = await kms.encrypt({
       encryption: {
         algorithm: 'C20P',
-        aad: TypedArrayEncoder.fromString(protectedString),
+        aad: TypedArrayEncoder.fromUtf8String(protectedString),
       },
-      data: JsonEncoder.toBuffer(message),
+      data: JsonEncoder.toUint8Array(message),
       key: {
         privateJwk: {
           kty: 'oct',
-          k: TypedArrayEncoder.toBase64URL(contentEncryptionKey),
+          k: TypedArrayEncoder.toBase64Url(contentEncryptionKey),
         },
       },
     })
@@ -136,16 +141,16 @@ export class DidCommEnvelopeService {
     }
 
     return {
-      ciphertext: TypedArrayEncoder.toBase64URL(encrypted),
-      iv: TypedArrayEncoder.toBase64URL(iv),
-      tag: TypedArrayEncoder.toBase64URL(tag),
+      ciphertext: TypedArrayEncoder.toBase64Url(encrypted),
+      iv: TypedArrayEncoder.toBase64Url(iv),
+      tag: TypedArrayEncoder.toBase64Url(tag),
       protected: protectedString,
     } satisfies DidCommEncryptedMessage
   }
 
   private async decryptDidcommV1Message(agentContext: AgentContext, encryptedMessage: DidCommEncryptedMessage) {
     const kms = agentContext.dependencyManager.resolve(Kms.KeyManagementApi)
-    const protectedJson = JsonEncoder.fromBase64(encryptedMessage.protected)
+    const protectedJson = JsonEncoder.fromBase64Url(encryptedMessage.protected)
 
     const alg = protectedJson.alg as 'Anoncrypt' | 'Authcrypt'
     if (alg !== 'Anoncrypt' && alg !== 'Authcrypt') {
@@ -194,7 +199,7 @@ export class DidCommEnvelopeService {
         decryption: {
           algorithm: 'XSALSA20-POLY1305',
         },
-        encrypted: TypedArrayEncoder.fromBase64(recipient.header.sender),
+        encrypted: TypedArrayEncoder.fromBase64Url(recipient.header.sender),
       })
 
       senderPublicJwk = Kms.PublicJwk.fromPublicKey({
@@ -208,16 +213,16 @@ export class DidCommEnvelopeService {
     const { data: contentEncryptionKey } = await kms.decrypt({
       decryption: {
         algorithm: 'XSALSA20-POLY1305',
-        iv: recipient.header.iv ? TypedArrayEncoder.fromBase64(recipient.header.iv) : undefined,
+        iv: recipient.header.iv ? TypedArrayEncoder.fromBase64Url(recipient.header.iv) : undefined,
       },
-      encrypted: TypedArrayEncoder.fromBase64(recipient.encrypted_key),
+      encrypted: TypedArrayEncoder.fromBase64Url(recipient.encrypted_key),
       key: {
         keyAgreement: {
           algorithm: 'ECDH-HSALSA20',
           keyId: recipientKey.keyId,
 
           // Optionally we have a sender
-          externalPublicJwk: senderPublicJwk?.convertTo(Kms.X25519PublicJwk).toJson(),
+          senderPublicJwk: senderPublicJwk?.convertTo(Kms.X25519PublicJwk).toJson(),
         },
       },
     })
@@ -225,21 +230,21 @@ export class DidCommEnvelopeService {
     const { data: message } = await kms.decrypt({
       decryption: {
         algorithm: 'C20P',
-        iv: TypedArrayEncoder.fromBase64(encryptedMessage.iv),
-        tag: TypedArrayEncoder.fromBase64(encryptedMessage.tag),
-        aad: TypedArrayEncoder.fromString(encryptedMessage.protected),
+        iv: TypedArrayEncoder.fromBase64Url(encryptedMessage.iv),
+        tag: TypedArrayEncoder.fromBase64Url(encryptedMessage.tag),
+        aad: TypedArrayEncoder.fromUtf8String(encryptedMessage.protected),
       },
       key: {
         privateJwk: {
           kty: 'oct',
-          k: TypedArrayEncoder.toBase64URL(contentEncryptionKey),
+          k: TypedArrayEncoder.toBase64Url(contentEncryptionKey),
         },
       },
-      encrypted: TypedArrayEncoder.fromBase64(encryptedMessage.ciphertext),
+      encrypted: TypedArrayEncoder.fromBase64Url(encryptedMessage.ciphertext),
     })
 
     return {
-      plaintextMessage: JsonEncoder.fromBuffer(message),
+      plaintextMessage: JsonEncoder.fromUint8Array(message),
       senderKey: senderPublicJwk,
       recipientKey,
     }
@@ -250,13 +255,10 @@ export class DidCommEnvelopeService {
     payload: DidCommMessage,
     keys: EnvelopeKeys
   ): Promise<DidCommEncryptedMessage> {
-    const didcommConfig = agentContext.dependencyManager.resolve(DidCommModuleConfig)
-
     const { routingKeys, senderKey } = keys
     let recipientKeys = keys.recipientKeys
 
-    // pass whether we want to use legacy did sov prefix
-    const message = payload.toJSON({ useDidSovPrefixWhereAllowed: didcommConfig.useDidSovPrefixWhereAllowed })
+    const message = payload.toJSON()
 
     this.logger.debug(`Pack outbound message ${message['@type']}`)
 
@@ -272,9 +274,7 @@ export class DidCommEnvelopeService {
       recipientKeys = [routingKey]
       this.logger.debug('Forward message created', forwardMessage)
 
-      const forwardJson = forwardMessage.toJSON({
-        useDidSovPrefixWhereAllowed: didcommConfig.useDidSovPrefixWhereAllowed,
-      })
+      const forwardJson = forwardMessage.toJSON()
 
       // Forward messages are anon packed
       encryptedMessage = await this.encryptDidcommV1Message(agentContext, forwardJson, [routingKey])
@@ -343,8 +343,10 @@ export class DidCommEnvelopeService {
             `Found mediator routing record with id '${mediatorRoutingRecord.id}' for recipient key '${publicKey.fingerprint}' for incoming didcomm message`
           )
 
-          const routingKey = mediatorRoutingRecord.routingKeysWithKeyId.find((routingKey) =>
-            publicKey.equals(routingKey)
+          // DIDComm v1 uses the Ed25519 routing key, the X25519 routing key only serves DIDComm v2
+          const routingKey = mediatorRoutingRecord.routingKeysWithKeyId.find(
+            (routingKey): routingKey is Kms.PublicJwk<Kms.Ed25519PublicJwk> =>
+              routingKey.is(Kms.Ed25519PublicJwk) && publicKey.equals(routingKey)
           )
 
           // This should not happen as we only get here if the tag matches
@@ -437,6 +439,17 @@ export class DidCommEnvelopeService {
     return null
   }
 }
+
+/**
+ * A key that can appear on a DIDComm envelope.
+ *
+ * V1 uses Ed25519 keys throughout. V2 uses the key-agreement curves that the DIDComm Messaging
+ * v2.1 specification requires. Both versions produce a decrypted context, so the context carries
+ * the union rather than the v1 type with a cast over it.
+ */
+export type DidCommEnvelopeKey = Kms.PublicJwk<
+  Kms.Ed25519PublicJwk | Kms.X25519PublicJwk | Kms.P256PublicJwk | Kms.P384PublicJwk
+>
 
 export interface DecryptedDidCommMessageContext {
   plaintextMessage: DidCommPlaintextMessage

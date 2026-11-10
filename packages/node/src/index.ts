@@ -10,6 +10,7 @@ import { DidCommWsInboundTransport } from './transport/DidCommWsInboundTransport
 export { NodeInMemoryKeyManagementStorage } from './kms/NodeInMemoryKeyManagementStorage'
 export { NodeKeyManagementService } from './kms/NodeKeyManagementService'
 export type { NodeKeyManagementStorage } from './kms/NodeKeyManagementStorage'
+export type { DidCommWsInboundTransportOptions } from './transport/DidCommWsInboundTransport'
 
 const agentDependencies: AgentDependencies = {
   FileSystem: NodeFileSystem,
@@ -18,4 +19,4 @@ const agentDependencies: AgentDependencies = {
   WebSocketClass: WebSocket,
 }
 
-export { agentDependencies, DidCommHttpInboundTransport, DidCommWsInboundTransport }
+export { agentDependencies, DidCommHttpInboundTransport, DidCommWsInboundTransport, NodeFileSystem }

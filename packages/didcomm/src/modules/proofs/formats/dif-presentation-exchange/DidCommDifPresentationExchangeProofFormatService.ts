@@ -2,15 +2,17 @@ import type {
   AgentContext,
   DifPexInputDescriptorToCredentials,
   DifPresentationExchangeSubmission,
-  IAnonCredsDataIntegrityService,
+  EncodedX509Certificate,
+  IAnonCredsW3cCredentialService,
   JsonValue,
   W3cJsonPresentation,
   W3cVerifiablePresentation,
   W3cVerifyPresentationResult,
+  X509VerificationTrustedCertificates,
 } from '@credo-ts/core'
 import {
-  ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE,
-  AnonCredsDataIntegrityServiceSymbol,
+  ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE,
+  AnonCredsW3cCredentialServiceSymbol,
   ClaimFormat,
   CredoError,
   DifPresentationExchangeService,
@@ -19,7 +21,6 @@ import {
   extractX509CertificatesFromJwt,
   JsonTransformer,
   Kms,
-  MdocDeviceResponse,
   TypedArrayEncoder,
   W3cCredentialService,
   W3cJsonLdVerifiablePresentation,
@@ -130,7 +131,7 @@ export class DidCommDifPresentationExchangeProofFormatService
           // NOTE: we always want to include a challenge to prevent replay attacks
           challenge:
             presentationExchangeFormat?.options?.challenge ??
-            TypedArrayEncoder.toBase64URL(kms.randomBytes({ length: 32 })),
+            TypedArrayEncoder.toBase64Url(kms.randomBytes({ length: 32 })),
           domain: presentationExchangeFormat?.options?.domain,
         },
       } satisfies DifPresentationExchangeRequest,
@@ -166,7 +167,7 @@ export class DidCommDifPresentationExchangeProofFormatService
         presentation_definition: presentationDefinition,
         options: {
           // NOTE: we always want to include a challenge to prevent replay attacks
-          challenge: options?.challenge ?? TypedArrayEncoder.toBase64URL(kms.randomBytes({ length: 32 })),
+          challenge: options?.challenge ?? TypedArrayEncoder.toBase64Url(kms.randomBytes({ length: 32 })),
           domain: options?.domain,
         },
       } satisfies DifPresentationExchangeRequest,
@@ -216,7 +217,7 @@ export class DidCommDifPresentationExchangeProofFormatService
     const presentation = await ps.createPresentation(agentContext, {
       presentationDefinition,
       credentialsForInputDescriptor: credentials,
-      challenge: options?.challenge ?? TypedArrayEncoder.toBase64URL(kms.randomBytes({ length: 32 })),
+      challenge: options?.challenge ?? TypedArrayEncoder.toBase64Url(kms.randomBytes({ length: 32 })),
       domain: options?.domain,
     })
 
@@ -234,30 +235,23 @@ export class DidCommDifPresentationExchangeProofFormatService
 
     const firstPresentation = presentation.verifiablePresentations[0]
 
-    // TODO: they should all have `encoded` property so it's easy to use the resulting VP
-    const encodedFirstPresentation =
-      firstPresentation instanceof W3cJwtVerifiablePresentation ||
-      firstPresentation instanceof W3cJsonLdVerifiablePresentation
-        ? firstPresentation.encoded
-        : firstPresentation instanceof MdocDeviceResponse
-          ? firstPresentation.base64Url
-          : firstPresentation?.compact
+    const encodedFirstPresentation = firstPresentation.encoded
     const attachment = this.getFormatData(encodedFirstPresentation, format.attachmentId)
 
     return { attachment, format }
   }
 
-  private shouldVerifyUsingAnonCredsDataIntegrity(
+  private shouldVerifyWithAnonCredsW3cService(
     presentation: W3cVerifiablePresentation,
     presentationSubmission: DifPresentationExchangeSubmission
   ) {
     if (presentation.claimFormat !== ClaimFormat.LdpVp) return false
     const descriptorMap = presentationSubmission.descriptor_map
 
-    const verifyUsingDataIntegrity = descriptorMap.every((descriptor) => descriptor.format === ClaimFormat.DiVp)
-    if (!verifyUsingDataIntegrity) return false
+    const verifyWithAnonCredsW3c = descriptorMap.every((descriptor) => descriptor.format === ClaimFormat.DiVp)
+    if (!verifyWithAnonCredsW3c) return false
 
-    return presentation.dataIntegrityCryptosuites.includes(ANONCREDS_DATA_INTEGRITY_CRYPTOSUITE)
+    return presentation.anonCredsW3cCredentialCryptosuites.includes(ANONCREDS_W3C_CREDENTIAL_CRYPTOSUITE)
   }
 
   public async processPresentation(
@@ -316,8 +310,7 @@ export class DidCommDifPresentationExchangeProofFormatService
         const x509Config = agentContext.dependencyManager.resolve(X509ModuleConfig)
 
         const certificateChain = extractX509CertificatesFromJwt(parsedPresentation.jwt)
-        let trustedCertificates: string[] | undefined
-
+        let trustedCertificates: EncodedX509Certificate[] | X509VerificationTrustedCertificates[] | undefined
         if (certificateChain && x509Config.getTrustedCertificatesForVerification) {
           trustedCertificates = await x509Config.getTrustedCertificatesForVerification?.(agentContext, {
             certificateChain,
@@ -339,13 +332,11 @@ export class DidCommDifPresentationExchangeProofFormatService
           domain: request.options.domain,
         })
       } else if (parsedPresentation.claimFormat === ClaimFormat.LdpVp) {
-        if (
-          this.shouldVerifyUsingAnonCredsDataIntegrity(parsedPresentation, jsonPresentation.presentation_submission)
-        ) {
-          const dataIntegrityService = agentContext.dependencyManager.resolve<IAnonCredsDataIntegrityService>(
-            AnonCredsDataIntegrityServiceSymbol
+        if (this.shouldVerifyWithAnonCredsW3cService(parsedPresentation, jsonPresentation.presentation_submission)) {
+          const anoncredsW3cCredentialService = agentContext.dependencyManager.resolve<IAnonCredsW3cCredentialService>(
+            AnonCredsW3cCredentialServiceSymbol
           )
-          const proofVerificationResult = await dataIntegrityService.verifyPresentation(agentContext, {
+          const proofVerificationResult = await anoncredsW3cCredentialService.verifyPresentation(agentContext, {
             presentation: parsedPresentation as W3cJsonLdVerifiablePresentation,
             presentationDefinition: request.presentation_definition,
             presentationSubmission: jsonPresentation.presentation_submission,
@@ -356,8 +347,8 @@ export class DidCommDifPresentationExchangeProofFormatService
             isValid: proofVerificationResult,
             validations: {},
             error: {
-              name: 'DataIntegrityError',
-              message: 'Verifying the Data Integrity Proof failed. An unknown error occurred.',
+              name: 'AnonCredsW3cCredentialError',
+              message: 'Verifying the anoncreds W3C credential proof failed. An unknown error occurred.',
             },
           }
         } else {

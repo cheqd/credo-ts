@@ -5,17 +5,18 @@ import queryString from 'query-string'
 import { DidCommMessage } from '../../../DidCommMessage'
 import { DidCommAttachment, DidCommAttachmentData } from '../../../decorators/attachment/DidCommAttachment'
 import type { DidCommPlaintextMessage } from '../../../types'
-import { IsValidMessageType, parseMessageType, replaceLegacyDidSovPrefix } from '../../../util/messageType'
+import { IsValidMessageType, parseMessageType } from '../../../util/messageType'
 import { OutOfBandDidCommService } from '../domain/OutOfBandDidCommService'
 import { outOfBandServiceToNumAlgo2Did } from '../helpers'
+import type { DidCommOutOfBandInvitationV2 } from './DidCommOutOfBandInvitationV2'
 
 /**
  * The original invitation an out of band invitation was derived from.
  */
 export enum DidCommInvitationType {
   OutOfBand = 'out-of-band/1.x',
-  Connection = 'connections/1.x',
   Connectionless = 'connectionless',
+  V2OutOfBand = 'out-of-band/2.x',
 }
 
 export interface DidCommOutOfBandInvitationOptions {
@@ -54,6 +55,13 @@ export class DidCommOutOfBandInvitation extends DidCommMessage {
   @Exclude()
   public invitationType?: DidCommInvitationType
 
+  /**
+   * When this invitation was parsed from a v2 OOB format (out-of-band/2.0/invitation),
+   * holds the original v2 invitation for v2-specific flows.
+   */
+  @Exclude()
+  public v2Invitation?: DidCommOutOfBandInvitationV2
+
   public addRequest(message: DidCommMessage) {
     if (!this.requests) this.requests = []
     const requestAttachment = new DidCommAttachment({
@@ -66,13 +74,28 @@ export class DidCommOutOfBandInvitation extends DidCommMessage {
     this.requests.push(requestAttachment)
   }
 
+  /**
+   * Add a pre-built `DidCommAttachment` to `requests~attach`.
+   *
+   * Lower-level companion to {@link addRequest} for callers that already hold a
+   * `DidCommAttachment` instance (e.g. when surfacing v2 OOB attachments through the
+   * unified invitation record).
+   */
+  public addRequestAttachment(attachment: DidCommAttachment) {
+    if (!this.requests) this.requests = []
+    this.requests.push(attachment)
+  }
+
   public getRequests(): DidCommPlaintextMessage[] | undefined {
     return this.requests?.map((request) => request.getDataAsJson())
   }
 
   public toUrl({ domain }: { domain: string }) {
+    if (this.v2Invitation) {
+      return this.v2Invitation.toUrl({ domain })
+    }
     const invitationJson = this.toJSON()
-    const encodedInvitation = JsonEncoder.toBase64URL(invitationJson)
+    const encodedInvitation = JsonEncoder.toBase64Url(invitationJson)
     const invitationUrl = `${domain}?oob=${encodedInvitation}`
     return invitationUrl
   }
@@ -81,7 +104,7 @@ export class DidCommOutOfBandInvitation extends DidCommMessage {
     const parsedUrl = queryString.parseUrl(invitationUrl).query
     const encodedInvitation = parsedUrl.oob
     if (typeof encodedInvitation === 'string') {
-      const invitationJson = JsonEncoder.fromBase64(encodedInvitation)
+      const invitationJson = JsonEncoder.fromBase64Url(encodedInvitation)
       const invitation = DidCommOutOfBandInvitation.fromJson(invitationJson)
 
       return invitation
@@ -121,9 +144,6 @@ export class DidCommOutOfBandInvitation extends DidCommMessage {
     return this.getServices().filter((service): service is OutOfBandDidCommService => typeof service !== 'string')
   }
 
-  @Transform(({ value }) => replaceLegacyDidSovPrefix(value), {
-    toClassOnly: true,
-  })
   @IsValidMessageType(DidCommOutOfBandInvitation.type)
   public readonly type = DidCommOutOfBandInvitation.type.messageTypeUri
   public static readonly type = parseMessageType('https://didcomm.org/out-of-band/1.1/invitation')
@@ -136,7 +156,6 @@ export class DidCommOutOfBandInvitation extends DidCommMessage {
   public readonly goal?: string
 
   public readonly accept?: string[]
-  @Transform(({ value }) => value?.map(replaceLegacyDidSovPrefix), { toClassOnly: true })
   @Expose({ name: 'handshake_protocols' })
   public handshakeProtocols?: string[]
 

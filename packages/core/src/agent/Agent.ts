@@ -1,5 +1,6 @@
 import { Subject } from 'rxjs'
 import { InjectionSymbols } from '../constants'
+import { JweService } from '../crypto/JweService'
 import { JwsService } from '../crypto/JwsService'
 import { CredoError } from '../error'
 import { DependencyManager } from '../plugins'
@@ -7,7 +8,7 @@ import { StorageUpdateService, StorageVersionRepository, UpdateAssistant } from 
 import type { InitConfig } from '../types'
 import { AgentConfig } from './AgentConfig'
 import type { AgentDependencies } from './AgentDependencies'
-import type { AgentModulesInput } from './AgentModules'
+import type { AgentModulesInput, ValidateAgentModules } from './AgentModules'
 import { extendModulesWithDefaultModules } from './AgentModules'
 import { BaseAgent } from './BaseAgent'
 import { AgentContext, DefaultAgentContextProvider } from './context'
@@ -15,7 +16,7 @@ import { EventEmitter } from './EventEmitter'
 
 interface AgentOptions<AgentModules extends AgentModulesInput> {
   config?: InitConfig
-  modules?: AgentModules
+  modules?: AgentModules & ValidateAgentModules<AgentModules>
   dependencies: AgentDependencies
 }
 
@@ -29,6 +30,7 @@ export class Agent<AgentModules extends AgentModulesInput = any> extends BaseAge
     // Register internal dependencies
     dependencyManager.registerSingleton(EventEmitter)
     dependencyManager.registerSingleton(JwsService)
+    dependencyManager.registerSingleton(JweService)
     dependencyManager.registerSingleton(StorageVersionRepository)
     dependencyManager.registerSingleton(StorageUpdateService)
 

@@ -1,32 +1,118 @@
-import {
-  didIndyCredentialDefinitionIdRegex,
-  didIndyRegex,
-  didIndyRevocationRegistryIdRegex,
-  didIndySchemaIdRegex,
-  unqualifiedCredentialDefinitionIdRegex,
-  unqualifiedRevocationRegistryIdRegex,
-  unqualifiedSchemaIdRegex,
-} from '@credo-ts/anoncreds'
+import { CredoError } from '@credo-ts/core'
+import { didIndyRegex } from '../../dids/didIndyUtil'
 
-// combines both legacy and did:indy anoncreds identifiers and also the issuer id
+const didIndyAnonCredsBase = new RegExp(`(${didIndyRegex.source.slice(1, -1)})/anoncreds/v0`)
+
+export const didIndySchemaIdRegex = new RegExp(`^${didIndyAnonCredsBase.source}/SCHEMA/(.+)/([0-9.]+)$`)
+
+export const didIndyCredentialDefinitionIdRegex = new RegExp(
+  `^${didIndyAnonCredsBase.source}/CLAIM_DEF/([1-9][0-9]*)/(.+)$`
+)
+
+export const didIndyRevocationRegistryIdRegex = new RegExp(
+  `^${didIndyAnonCredsBase.source}/REV_REG_DEF/([1-9][0-9]*)/(.+)/(.+)$`
+)
+
+export function isDidIndySchemaId(schemaId: string) {
+  return didIndySchemaIdRegex.test(schemaId)
+}
+
+export function isDidIndyCredentialDefinitionId(credentialDefinitionId: string) {
+  return didIndyCredentialDefinitionIdRegex.test(credentialDefinitionId)
+}
+
+export function isDidIndyRevocationRegistryId(revocationRegistryId: string) {
+  return didIndyRevocationRegistryIdRegex.test(revocationRegistryId)
+}
+
+export interface ParsedIndySchemaId {
+  did: string
+  namespace: string
+  namespaceIdentifier: string
+  schemaName: string
+  schemaVersion: string
+}
+
+export function parseIndySchemaId(schemaId: string): ParsedIndySchemaId {
+  const match = schemaId.match(didIndySchemaIdRegex)
+  if (match) {
+    const [, did, namespace, namespaceIdentifier, schemaName, schemaVersion] = match
+
+    return {
+      did,
+      namespace,
+      namespaceIdentifier,
+      schemaName,
+      schemaVersion,
+    }
+  }
+
+  throw new CredoError(`Invalid did:indy schema id: ${schemaId}`)
+}
+
+export interface ParsedIndyCredentialDefinitionId {
+  did: string
+  namespace: string
+  namespaceIdentifier: string
+  schemaSeqNo: string
+  tag: string
+}
+
+export function parseIndyCredentialDefinitionId(credentialDefinitionId: string): ParsedIndyCredentialDefinitionId {
+  const match = credentialDefinitionId.match(didIndyCredentialDefinitionIdRegex)
+  if (match) {
+    const [, did, namespace, namespaceIdentifier, schemaSeqNo, tag] = match
+
+    return {
+      did,
+      namespace,
+      namespaceIdentifier,
+      schemaSeqNo,
+      tag,
+    }
+  }
+
+  throw new CredoError(`Invalid did:indy credential definition id: ${credentialDefinitionId}`)
+}
+
+export interface ParsedIndyRevocationRegistryId {
+  did: string
+  namespace: string
+  namespaceIdentifier: string
+  schemaSeqNo: string
+  credentialDefinitionTag: string
+  revocationRegistryTag: string
+}
+
+export function parseIndyRevocationRegistryId(revocationRegistryId: string): ParsedIndyRevocationRegistryId {
+  const match = revocationRegistryId.match(didIndyRevocationRegistryIdRegex)
+  if (match) {
+    const [, did, namespace, namespaceIdentifier, schemaSeqNo, credentialDefinitionTag, revocationRegistryTag] = match
+
+    return {
+      did,
+      namespace,
+      namespaceIdentifier,
+      schemaSeqNo,
+      credentialDefinitionTag,
+      revocationRegistryTag,
+    }
+  }
+
+  throw new CredoError(`Invalid did:indy revocation registry id: ${revocationRegistryId}`)
+}
+
 const indyVdrAnonCredsRegexes = [
-  // NOTE: we only include the qualified issuer id here, as we don't support registering objects based on legacy issuer ids.
-  // you can still resolve using legacy issuer ids, but you need to use the full did:indy identifier when registering.
-  // As we find a matching anoncreds registry based on the issuerId only when creating an object, this will make sure
-  // it will throw an no registry found for identifier error.
   // issuer id
   didIndyRegex,
 
   // schema
   didIndySchemaIdRegex,
-  unqualifiedSchemaIdRegex,
 
   // credential definition
   didIndyCredentialDefinitionIdRegex,
-  unqualifiedCredentialDefinitionIdRegex,
 
   // revocation registry
-  unqualifiedRevocationRegistryIdRegex,
   didIndyRevocationRegistryIdRegex,
 ]
 
@@ -65,4 +151,33 @@ export function getDidIndyRevocationRegistryEntryId(
   revocationRegistryTag: string
 ) {
   return `did:indy:${namespace}:${unqualifiedDid}/anoncreds/v0/REV_REG_ENTRY/${schemaSeqNo}/${credentialDefinitionTag}/${revocationRegistryTag}`
+}
+
+/**
+ * The indy ledger identifies AnonCreds objects with the unqualified identifier format in its transactions.
+ * The functions below create these ledger identifiers from the parts of a did:indy identifier.
+ */
+
+// <namespaceIdentifier>:2:<schemaName>:<schemaVersion>
+export function getIndyLedgerSchemaId(namespaceIdentifier: string, name: string, version: string) {
+  return `${namespaceIdentifier}:2:${name}:${version}`
+}
+
+// <namespaceIdentifier>:3:CL:<schemaSeqNo>:<tag>
+export function getIndyLedgerCredentialDefinitionId(
+  namespaceIdentifier: string,
+  schemaSeqNo: string | number,
+  tag: string
+) {
+  return `${namespaceIdentifier}:3:CL:${schemaSeqNo}:${tag}`
+}
+
+// <namespaceIdentifier>:4:<namespaceIdentifier>:3:CL:<schemaSeqNo>:<credentialDefinitionTag>:CL_ACCUM:<revocationRegistryTag>
+export function getIndyLedgerRevocationRegistryDefinitionId(
+  namespaceIdentifier: string,
+  schemaSeqNo: string | number,
+  credentialDefinitionTag: string,
+  revocationRegistryTag: string
+) {
+  return `${namespaceIdentifier}:4:${namespaceIdentifier}:3:CL:${schemaSeqNo}:${credentialDefinitionTag}:CL_ACCUM:${revocationRegistryTag}`
 }
