@@ -627,10 +627,11 @@ export class CheqdDidRegistrar implements DidRegistrar {
       let data: Uint8Array
       if (typeof resource.data === 'string') {
         data = decodeBase64OrBase64Url(resource.data)
-      } else if (typeof resource.data === 'object') {
-        data = TypedArrayEncoder.fromUtf8String(JSON.stringify(resource.data))
-      } else {
+      } else if (resource.data instanceof Uint8Array) {
+        // Must be checked before the object case, a Uint8Array is also an object
         data = resource.data
+      } else {
+        data = TypedArrayEncoder.fromUtf8String(JSON.stringify(resource.data))
       }
 
       const resourcePayload = MsgCreateResourcePayload.fromPartial({
