@@ -7,7 +7,7 @@ import { CheqdLedgerService } from '../src/ledger'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 
 const RESOURCE_NAME = 'revocation-list'
-const RESOURCE_TYPE = 'TokenStatusListJwt'
+const RESOURCE_TYPE = 'TokenStatusList'
 
 // Maps the public resolver style url used as the status list uri onto a did url with a name and type query,
 // which the cheqd resolver resolves to the latest version of the resource.
