@@ -4,10 +4,14 @@ on:
   pull_request:
     branches:
       - main
+      # The fork's default branch is cheqd, so CI must run there too
+      - cheqd
   push:
     branches:
       - main
+      - cheqd
   pull_request_review:
+  workflow_dispatch:
 
 env:
   NODE_OPTIONS: --max_old_space_size=6144
