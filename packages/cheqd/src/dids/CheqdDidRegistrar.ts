@@ -1,6 +1,5 @@
 import {
   CheqdNetwork,
-  createDidVerificationMethod,
   type DIDDocument,
   type DidFeeOptions,
   type DidStdFee,
