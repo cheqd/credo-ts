@@ -275,6 +275,9 @@ importers:
 
   .:
     devDependencies:
+      '@a2a-js/sdk':
+        specifier: 1.3.0
+        version: 1.3.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.4)(express@5.3.0(supports-color@8.1.1))(pg@8.23.1)
       '@biomejs/biome':
         specifier: 'catalog:'
         version: 2.5.14
@@ -1312,6 +1315,34 @@ importers:
         version: 2.5.0
 
 packages:
+
+  '@a2a-js/sdk@1.3.0':
+    resolution: {integrity: sha512-OpK4nygUnLKlpTFZlM2IrYu7f3c/B7c4u4Z14+vgMq24lEINTVCxH/BqZx+GL92rNf7CoBL5oTP5UhNsl75yyg==}
+    engines: {node: '>=20'}
+    hasBin: true
+    peerDependencies:
+      '@bufbuild/protobuf': ^2.10.2
+      '@grpc/grpc-js': ^1.11.0
+      better-sqlite3: ^12.0.0 || ^13.0.0
+      express: ^4.21.2 || ^5.1.0
+      kysely: ^0.28.17 || ^0.29.0
+      mysql2: ^3.0.0
+      pg: ^8.0.0
+    peerDependenciesMeta:
+      '@bufbuild/protobuf':
+        optional: true
+      '@grpc/grpc-js':
+        optional: true
+      better-sqlite3:
+        optional: true
+      express:
+        optional: true
+      kysely:
+        optional: true
+      mysql2:
+        optional: true
+      pg:
+        optional: true
 
   '@animo-id/expo-secure-environment@0.3.0':
     resolution: {integrity: sha512-Hy9KnqhsCgUJ1Masol5+8xYVLxOR2jtvsiIlojGFzDIideSEyaWhrRXVGrwIE5k+TO/7FXdkJ+00c3n59xl6kA==}
@@ -7563,6 +7594,15 @@ packages:
     engines: {node: ^12.22.0 || ^14.17.0 || ^15.12.0 || >=16}
 
 snapshots:
+
+  '@a2a-js/sdk@1.3.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.4)(express@5.3.0(supports-color@8.1.1))(pg@8.23.1)':
+    dependencies:
+      jose: 6.2.14
+    optionalDependencies:
+      '@bufbuild/protobuf': 2.16.0
+      '@grpc/grpc-js': 1.14.4
+      express: 5.3.0(supports-color@8.1.1)
+      pg: 8.23.1
 
   '@animo-id/expo-secure-environment@0.3.0(expo@57.0.26)(react-native@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(react@19.3.1)(supports-color@8.1.1))(react@19.3.1)':
     dependencies:
