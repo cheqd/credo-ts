@@ -14,6 +14,7 @@ import { transformPrivateKeyToPrivateJwk } from '../../askar/src'
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions, CheqdDidUpdateOptions } from '../src'
 import { CheqdDidRegistrar } from '../src'
+import { CheqdLedgerService } from '../src/ledger'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 import { validService } from './testUtils'
 
@@ -387,6 +388,46 @@ describe('Cheqd DID registrar', () => {
       })
 
       expect(result.resourceState).toMatchObject({ state: 'finished' })
+    })
+  })
+
+  describe('createResource with Uint8Array and object data', () => {
+    const create = async (data: Uint8Array | object) => {
+      const didResult = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: {
+          createKey: { type: { kty: 'OKP', crv: 'Ed25519' } },
+          network: 'testnet',
+          methodSpecificIdAlgo: 'uuid',
+        },
+      })
+      if (!didResult.didState.did) throw new Error('No DID created')
+      const did = didResult.didState.did
+
+      const id = utils.uuid()
+      const registrar = agent.dependencyManager.resolve(CheqdDidRegistrar)
+      const result = await registrar.createResource(agent.context, did, {
+        id,
+        name: 'BytesResource',
+        resourceType: 'test',
+        data,
+        version: '1',
+      })
+      expect(result.resourceState).toMatchObject({ state: 'finished' })
+
+      const ledger = agent.dependencyManager.resolve(CheqdLedgerService)
+      const stored = await ledger.resolveResource(did, did.split(':')[3], id)
+      return stored.resource?.data
+    }
+
+    it('stores Uint8Array data as the same bytes', async () => {
+      const bytes = TypedArrayEncoder.fromUtf8String('header.payload.signature')
+      expect(await create(bytes)).toEqual(bytes)
+    })
+
+    it('stores object data as JSON', async () => {
+      const stored = await create({ hello: 'world' })
+      expect(TypedArrayEncoder.toUtf8String(stored as Uint8Array)).toBe('{"hello":"world"}')
     })
   })
 })
