@@ -46,8 +46,15 @@ export default defineConfig({
         test: {
           name: 'e2e',
           include: ['**/*.e2e.{test,spec}.?(c|m)[jt]s?(x)'],
-          // Ignore drizzle tests
-          exclude: ['**/node_modules/**', '**/build/**', '**/*.drizzle.e2e.{test,spec}.?(c|m)[jt]s?(x)'],
+          exclude: [
+            '**/node_modules/**',
+            '**/build/**',
+            // Ignore drizzle tests
+            '**/*.drizzle.e2e.{test,spec}.?(c|m)[jt]s?(x)',
+            // These hit the live Hedera testnet with a shared operator account, so they fail in CI for reasons
+            // unrelated to the code. Set RUN_HEDERA_E2E=true to run them.
+            ...(process.env.RUN_HEDERA_E2E === 'true' ? [] : ['packages/hedera/tests/integration/**']),
+          ],
         },
       },
       {
