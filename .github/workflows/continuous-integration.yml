@@ -123,6 +123,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      # The indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS
+      - name: Use public DNS for docker
+        run: |
+          f=/etc/docker/daemon.json
+          sudo mkdir -p /etc/docker
+          [ -f "$f" ] || echo '{}' | sudo tee "$f" > /dev/null
+          sudo jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$f" | sudo tee "$f.new" > /dev/null
+          sudo mv "$f.new" "$f"
+          sudo systemctl restart docker
+
       # setup dependencies
       - name: Setup services
         run: docker compose up -d
@@ -190,6 +200,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      # The indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS
+      - name: Use public DNS for docker
+        run: |
+          f=/etc/docker/daemon.json
+          sudo mkdir -p /etc/docker
+          [ -f "$f" ] || echo '{}' | sudo tee "$f" > /dev/null
+          sudo jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$f" | sudo tee "$f.new" > /dev/null
+          sudo mv "$f.new" "$f"
+          sudo systemctl restart docker
 
       # setup dependencies
       - name: Setup services
