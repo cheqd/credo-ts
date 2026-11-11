@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
+import { AgentCard, canonicalizeAgentCard, verifyAgentCardSignature as verifyWithA2aSdk } from '@a2a-js/sdk'
 import type { DidDocument } from '@credo-ts/core'
 import {
   Agent,
@@ -7,6 +8,7 @@ import {
   DidRepository,
   getEd25519VerificationKey2018,
   getJsonWebKey2020,
+  getPublicJwkFromVerificationMethod,
   Kms,
   TypedArrayEncoder,
   utils,
@@ -15,7 +17,7 @@ import { transformPrivateKeyToPrivateJwk } from '../../askar/src'
 
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions, CheqdDidUpdateOptions } from '../src'
-import { CheqdDidRegistrar } from '../src'
+import { CheqdDidRegistrar, signAgentCardPayload, verifyAgentCardSignature } from '../src'
 import { CheqdLedgerService } from '../src/ledger'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 import { validService } from './testUtils'
@@ -537,5 +539,57 @@ describe('Cheqd DID registrar', () => {
       const stored = await create({ hello: 'world' })
       expect(TypedArrayEncoder.toUtf8String(stored as Uint8Array)).toBe('{"hello":"world"}')
     })
+  })
+})
+
+describe('Agent card signed by a P-256 did:cheqd', () => {
+  // The verifier holds no record of the did, so it has to resolve it from the ledger
+  const verifier = new Agent(getAgentOptions('Agent card verifier', {}, {}, getCheqdModules(cheqdPayerSeeds[0])))
+  const signer = new Agent(getAgentOptions('Agent card signer', {}, {}, getCheqdModules(cheqdPayerSeeds[0])))
+
+  beforeAll(async () => {
+    await Promise.all([signer.initialize(), verifier.initialize()])
+  })
+
+  afterAll(async () => {
+    await Promise.all([signer.shutdown(), verifier.shutdown()])
+  })
+
+  it('is verified by a separate agent and by the official A2A SDK through the ledger', async () => {
+    const created = await signer.dids.create<CheqdDidCreateOptions>({
+      method: 'cheqd',
+      options: { createKey: { type: { kty: 'EC', crv: 'P-256' } }, network: 'testnet' },
+    })
+    expect(created.didState.state).toBe('finished')
+    const didUrl = `${created.didState.did}#key-1`
+
+    const card = AgentCard.fromJSON({
+      name: 'Agent with a did:cheqd identity',
+      description: 'Signed with a P-256 key of its DID',
+      supportedInterfaces: [
+        { url: 'https://agent.example.com/a2a', protocolBinding: 'JSONRPC', protocolVersion: '1.0' },
+      ],
+      version: '1.0.0',
+      capabilities: {},
+      defaultInputModes: ['text/plain'],
+      defaultOutputModes: ['text/plain'],
+      skills: [],
+    })
+    const payload = canonicalizeAgentCard(card)
+    const signature = await signAgentCardPayload(signer.context, { didUrl, payload })
+    card.signatures = [{ ...signature, header: {} }]
+
+    expect(await verifyAgentCardSignature(verifier.context, { payload, signature })).toEqual({ isValid: true, didUrl })
+
+    await expect(
+      verifyWithA2aSdk(async (kid) => {
+        const { didDocument } = await verifier.dids.resolve(kid.split('#')[0])
+        if (!didDocument) throw new Error(`could not resolve ${kid}`)
+        return getPublicJwkFromVerificationMethod(didDocument.dereferenceKey(kid, ['authentication'])).toJson()
+      })(card)
+    ).resolves.toBeUndefined()
+
+    const tampered = await verifyAgentCardSignature(verifier.context, { payload: `${payload} `, signature })
+    expect(tampered.isValid).toBe(false)
   })
 })

@@ -1,5 +1,6 @@
 // Dids
 
+export * from './agent-id'
 export { CheqdModule } from './CheqdModule'
 export { CheqdModuleConfig, type CheqdModuleConfigOptions } from './CheqdModuleConfig'
 export {
@@ -10,3 +11,4 @@ export {
   type CheqdDidUpdateOptions,
 } from './dids'
 export { CheqdLedgerService } from './ledger'
+export * from './status-list'
