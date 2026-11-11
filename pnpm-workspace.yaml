@@ -22,7 +22,7 @@ catalog:
   '@astronautlabs/jsonpath': ^1.1.2
   '@biomejs/biome': 2.5.14
   # Keep the cheqd dependencies aligned with the versions supported by @cheqd/sdk-esm.
-  '@cheqd/sdk': npm:@cheqd/sdk-esm@5.5.1
+  '@cheqd/sdk': npm:@cheqd/sdk-esm@5.6.0
   '@cheqd/ts-proto': ^4.2.0
   '@cosmjs/crypto': ^0.36.2
   '@cosmjs/proto-signing': ^0.36.2
@@ -75,3 +75,4 @@ minimumReleaseAgeExclude:
   - '@peculiar/x509@2.2.0'
   - nock@15.0.2
   - '@animo-id/expo-secure-environment@0.3.0'
+  - '@cheqd/sdk-esm@5.6.0'
