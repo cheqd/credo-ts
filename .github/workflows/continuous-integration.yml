@@ -123,7 +123,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      # The indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS
+      # Temporary: the indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS.
+      # Remove once the runner's DNS is reliable again, see https://github.com/cheqd/studio/issues/883
       - name: Use public DNS for docker
         run: |
           f=/etc/docker/daemon.json
@@ -201,7 +202,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      # The indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS
+      # Temporary: the indy-pool image build fails to resolve archive.ubuntu.com with the runner's default docker DNS.
+      # Remove once the runner's DNS is reliable again, see https://github.com/cheqd/studio/issues/883
       - name: Use public DNS for docker
         run: |
           f=/etc/docker/daemon.json
