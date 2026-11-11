@@ -28,6 +28,7 @@
     "changeset-version": "pnpm changeset version && pnpm style:fix"
   },
   "devDependencies": {
+    "@a2a-js/sdk": "1.3.0",
     "@biomejs/biome": "catalog:",
     "@changesets/cli": "^3.0.3",
     "@credo-ts/action-menu": "workspace:*",
