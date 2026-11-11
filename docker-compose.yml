@@ -26,6 +26,9 @@ services:
     build:
       context: .
       dockerfile: network/indy-pool.dockerfile
+      # The build resolves package hosts with the runner's DNS. On the default build network, apt-get update has failed with
+      # "Could not resolve archive.ubuntu.com" on GitHub runners.
+      network: host
     ports:
       - '9701-9708:9701-9708'
     # Start supervisord in bg, run commands, bring supervisor to fg.
