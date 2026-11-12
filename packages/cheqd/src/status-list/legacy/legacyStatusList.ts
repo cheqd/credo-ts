@@ -107,7 +107,13 @@ export interface LegacyStatusEntry {
   id?: string
   type: 'StatusList2021Entry' | 'BitstringStatusListEntry'
   statusPurpose: LegacyStatusPurpose
-  statusListIndex: string | number
+  /** One index. Use this or the multiple index fields below. */
+  statusListIndex?: string | number
+  /** Several indices, as numbers, numeric strings or ranges such as `'5-10'` (Bitstring entries written by Studio) */
+  statusListIndices?: (string | number)[]
+  /** An inclusive range of indices */
+  statusListRangeStart?: number
+  statusListRangeEnd?: number
   statusListCredential: string
   /** Bitstring only, bits per entry. Defaults to the size the list declares. */
   statusSize?: number
@@ -215,6 +221,57 @@ function didOfIssuer(issuer: string | { id: string }) {
   return typeof issuer === 'string' ? issuer : issuer.id
 }
 
+export const defaultMaxStatusIndices = 10_000
+
+/**
+ * The indices an entry asks about: its `statusListIndex`, its `statusListIndices` (numbers, numeric strings or ranges
+ * like `'5-10'`) and its `statusListRangeStart` to `statusListRangeEnd`, each once, in order. The number is capped: an
+ * entry comes from a credential someone else issued, and a range of millions would otherwise be read for it.
+ */
+export function expandLegacyStatusIndices(
+  entry: Pick<
+    LegacyStatusEntry,
+    'statusListIndex' | 'statusListIndices' | 'statusListRangeStart' | 'statusListRangeEnd'
+  >,
+  maxIndices = defaultMaxStatusIndices
+): number[] {
+  const indices = new Set<number>()
+  const add = (index: number) => {
+    if (!Number.isInteger(index) || index < 0) throw new CredoError(`Invalid status list index ${index}`)
+    indices.add(index)
+    if (indices.size > maxIndices) throw new CredoError(`A status entry asks about more than ${maxIndices} indices`)
+  }
+  const addRange = (start: number, end: number) => {
+    const low = Math.min(start, end)
+    const high = Math.max(start, end)
+    if (high - low >= maxIndices) throw new CredoError(`A status entry asks about more than ${maxIndices} indices`)
+    for (let index = low; index <= high; index++) add(index)
+  }
+
+  if (entry.statusListIndex !== undefined) add(Number.parseInt(String(entry.statusListIndex), 10))
+
+  for (const raw of entry.statusListIndices ?? []) {
+    if (typeof raw === 'number') {
+      add(raw)
+      continue
+    }
+    const range = raw.trim().match(/^(\d+)\s*-\s*(\d+)$/)
+    if (range) addRange(Number.parseInt(range[1], 10), Number.parseInt(range[2], 10))
+    else add(Number.parseInt(raw, 10))
+  }
+
+  if (entry.statusListRangeStart !== undefined || entry.statusListRangeEnd !== undefined) {
+    const { statusListRangeStart: start, statusListRangeEnd: end } = entry
+    if (start === undefined || end === undefined) {
+      throw new CredoError('A status entry needs both statusListRangeStart and statusListRangeEnd')
+    }
+    addRange(start, end)
+  }
+
+  if (indices.size === 0) throw new CredoError('A status entry has no index')
+  return Array.from(indices)
+}
+
 /**
  * Checks the `credentialStatus` of a credential issued with a StatusList2021 or Bitstring status list.
  *
@@ -227,7 +284,7 @@ function didOfIssuer(issuer: string | { id: string }) {
 export async function checkLegacyCredentialStatus(
   agentContext: AgentContext,
   credential: { issuer: string | { id: string }; credentialStatus?: LegacyStatusEntry | LegacyStatusEntry[] },
-  options: { requireIssuerMatch?: boolean } = {}
+  options: { requireIssuerMatch?: boolean; maxIndices?: number } = {}
 ): Promise<LegacyStatusResult[]> {
   const issuer = didOfIssuer(credential.issuer)
   const results: LegacyStatusResult[] = []
@@ -251,24 +308,25 @@ export async function checkLegacyCredentialStatus(
     }
 
     const statusSize = entry.statusSize ?? list.statusSize
-    const index = Number.parseInt(String(entry.statusListIndex), 10)
-    const status = getBitstringStatus(list.bits, index, statusSize)
-    const message = (list.statusMessages ?? entry.statusMessage)?.find(
-      (candidate) => candidate.status === `0x${status.toString(16)}`
-    )?.message
+    for (const index of expandLegacyStatusIndices(entry, options.maxIndices)) {
+      const status = getBitstringStatus(list.bits, index, statusSize)
+      const message = (list.statusMessages ?? entry.statusMessage)?.find(
+        (candidate) => candidate.status === `0x${status.toString(16)}`
+      )?.message
 
-    results.push({
-      type: entry.type,
-      statusPurpose: entry.statusPurpose,
-      statusListIndex: index,
-      status,
-      valid: status === 0,
-      revoked: (entry.statusPurpose === 'revocation' && status !== 0) || message === 'revoked',
-      suspended: (entry.statusPurpose === 'suspension' && status !== 0) || message === 'suspended',
-      message,
-      statusListCredential: entry.statusListCredential,
-      resourceId: list.resourceId,
-    })
+      results.push({
+        type: entry.type,
+        statusPurpose: entry.statusPurpose,
+        statusListIndex: index,
+        status,
+        valid: status === 0,
+        revoked: (entry.statusPurpose === 'revocation' && status !== 0) || message === 'revoked',
+        suspended: (entry.statusPurpose === 'suspension' && status !== 0) || message === 'suspended',
+        message,
+        statusListCredential: entry.statusListCredential,
+        resourceId: list.resourceId,
+      })
+    }
   }
 
   return results

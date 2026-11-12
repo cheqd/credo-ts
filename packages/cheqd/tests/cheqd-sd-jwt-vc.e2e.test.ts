@@ -1,4 +1,14 @@
-import { Agent, Kms, SdJwtVcModule, StatusListCwt, X509Service } from '@credo-ts/core'
+import {
+  Agent,
+  ClaimFormat,
+  JsonTransformer,
+  Kms,
+  SdJwtVcModule,
+  StatusListCwt,
+  W3cCredential,
+  W3cJwtVerifiableCredential,
+  X509Service,
+} from '@credo-ts/core'
 
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions } from '../src'
@@ -381,6 +391,161 @@ describe('StatusList2021 and Bitstring status lists stored as did:cheqd linked r
     await expect(
       check({ issuer: did, credentialStatus: { ...entry, statusListCredential: 'https://example.com/status/1' } })
     ).rejects.toThrow('not the uri of a did:cheqd status list')
+  })
+
+  describe('revoking, suspending and reinstating a credential, and several indices in an entry', () => {
+    const sdk = () => issuer.modules.cheqdSdk
+
+    it('writes a StatusList2021 revocation and suspension, and refuses what the entry does not allow', async () => {
+      const revocation = await sdk().createLegacyStatusList(did, {
+        format: 'StatusList2021',
+        name: 'actions revocation',
+        statusPurpose: 'revocation',
+      })
+      const suspension = await sdk().createLegacyStatusList(did, {
+        format: 'StatusList2021',
+        name: 'actions suspension',
+        statusPurpose: 'suspension',
+      })
+      const revocable = {
+        issuer: did,
+        credentialStatus: createLegacyStatusEntry({
+          format: 'StatusList2021',
+          statusListCredential: revocation.uri,
+          statusPurpose: 'revocation',
+          index: 5,
+        }),
+      }
+      const suspendable = {
+        issuer: did,
+        credentialStatus: createLegacyStatusEntry({
+          format: 'StatusList2021',
+          statusListCredential: suspension.uri,
+          statusPurpose: 'suspension',
+          index: 6,
+        }),
+      }
+
+      await sdk().setLegacyCredentialStatus(suspendable, 'suspend')
+      expect(await check(suspendable)).toMatchObject([{ suspended: true, valid: false }])
+      await sdk().setLegacyCredentialStatus(suspendable, 'reinstate')
+      expect(await check(suspendable)).toMatchObject([{ suspended: false, valid: true }])
+
+      const written = await sdk().setLegacyCredentialStatus(revocable, 'revoke')
+      expect(written).toMatchObject([{ did, indices: [5], value: 1 }])
+      expect(await check(revocable)).toMatchObject([{ revoked: true }])
+
+      // a revocation is not undone, and an entry only takes the action of its purpose
+      await expect(sdk().setLegacyCredentialStatus(revocable, 'reinstate')).rejects.toThrow('cannot be undone')
+      await expect(sdk().setLegacyCredentialStatus(revocable, 'suspend')).rejects.toThrow(
+        "Cannot suspend an entry of the purpose 'revocation'"
+      )
+      await expect(sdk().setLegacyCredentialStatus({ issuer: did }, 'revoke')).rejects.toThrow('no credentialStatus')
+      // and only for the issuer of the credential
+      await expect(sdk().setLegacyCredentialStatus({ ...revocable, issuer: otherDid }, 'revoke')).rejects.toThrow(
+        'not of the issuer'
+      )
+    })
+
+    it('writes the values Studio uses to a Bitstring list, for an entry with several indices', async () => {
+      const list = await sdk().createLegacyStatusList(did, {
+        format: 'BitstringStatusList',
+        name: 'actions bitstring',
+        signerDidUrl: `${did}#key-1`,
+      })
+      const entry = {
+        ...createLegacyStatusEntry({
+          format: 'BitstringStatusList',
+          statusListCredential: list.uri,
+          statusPurpose: 'message',
+          index: 0,
+        }),
+        statusListIndex: undefined,
+        statusListIndices: ['20-22', 30],
+      }
+      const credential = { issuer: did, credentialStatus: entry }
+
+      await sdk().setLegacyCredentialStatus(credential, 'revoke')
+      expect(
+        (await check(credential)).map((result) => [result.statusListIndex, result.status, result.message])
+      ).toEqual([
+        [20, 1, 'revoked'],
+        [21, 1, 'revoked'],
+        [22, 1, 'revoked'],
+        [30, 1, 'revoked'],
+      ])
+
+      await sdk().setLegacyCredentialStatus(credential, 'suspend')
+      expect((await check(credential)).every((result) => result.status === 2 && result.suspended)).toBe(true)
+
+      await sdk().setLegacyCredentialStatus(credential, 'reinstate')
+      expect((await check(credential)).every((result) => result.valid)).toBe(true)
+    })
+
+    it('reads the status of a whole presentation, a JWT credential among them', async () => {
+      const list = await sdk().createLegacyStatusList(did, {
+        format: 'StatusList2021',
+        name: 'presentation list',
+        statusPurpose: 'revocation',
+      })
+      const entry = (index: number) =>
+        createLegacyStatusEntry({
+          format: 'StatusList2021',
+          statusListCredential: list.uri,
+          statusPurpose: 'revocation',
+          index,
+        })
+
+      const jwt = await issuer.w3cCredentials.signCredential({
+        format: ClaimFormat.JwtVc,
+        credential: JsonTransformer.fromJSON(
+          {
+            '@context': ['https://www.w3.org/2018/credentials/v1'],
+            type: ['VerifiableCredential'],
+            issuer: did,
+            issuanceDate: '2026-01-01T00:00:00Z',
+            credentialSubject: { id: 'did:example:subject' },
+            credentialStatus: entry(1),
+          },
+          W3cCredential
+        ),
+        alg: 'ES256',
+        verificationMethod: `${did}#key-1`,
+      })
+      const revoked = { issuer: did, credentialStatus: entry(2) }
+      await sdk().setLegacyCredentialStatus(revoked, 'revoke')
+
+      const allValid = await sdk().checkLegacyPresentationStatus({
+        verifiableCredential: [
+          (jwt as W3cJwtVerifiableCredential).serializedJwt,
+          { issuer: did, credentialStatus: entry(3) },
+          { issuer: did },
+        ],
+      })
+      expect(allValid).toMatchObject({ valid: true, revoked: false, suspended: false })
+      expect(allValid.credentials).toHaveLength(3)
+
+      const withRevoked = await sdk().checkLegacyPresentationStatus({
+        verifiableCredential: [(jwt as W3cJwtVerifiableCredential).serializedJwt, revoked],
+      })
+      expect(withRevoked).toMatchObject({ valid: false, revoked: true, suspended: false })
+
+      // a list that cannot be read is reported for that credential and does not hide the others
+      const unreadable = await sdk().checkLegacyPresentationStatus({
+        verifiableCredential: [
+          revoked,
+          { issuer: did, credentialStatus: { ...entry(1), statusListCredential: 'https://example.com/status' } },
+        ],
+      })
+      expect(unreadable.valid).toBe(false)
+      expect(unreadable.credentials[0]).toMatchObject({ index: 0, results: [{ revoked: true }] })
+      expect(unreadable.credentials[1]).toMatchObject({
+        index: 1,
+        error: expect.stringContaining('not the uri of a did:cheqd status list'),
+      })
+
+      await expect(sdk().checkLegacyPresentationStatus({})).rejects.toThrow('no credentials')
+    })
   })
 
   it('refuses a list of the other format than the entry says', async () => {
