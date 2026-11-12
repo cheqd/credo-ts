@@ -45,6 +45,8 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'e2e',
+          // beforeAll hooks of the DIDComm e2e tests start agents and issue credentials: 6-35s on CI runners, close to the global 40s
+          hookTimeout: 120000,
           include: ['**/*.e2e.{test,spec}.?(c|m)[jt]s?(x)'],
           exclude: [
             '**/node_modules/**',
@@ -61,6 +63,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'drizzle',
+          hookTimeout: 120000,
           include: ['**/*.drizzle.e2e.{test,spec}.?(c|m)[jt]s?(x)'],
         },
       },
