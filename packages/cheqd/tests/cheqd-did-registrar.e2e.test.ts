@@ -205,6 +205,60 @@ describe('Cheqd DID registrar', () => {
       expect(second.didState).toMatchObject({ state: 'finished' })
     })
 
+    // A did created by one agent can be taken over by another that is given the private key: the key goes into the kms of
+    // the second agent, and the did is imported with it.
+    it('lets another agent that imports the did and its key update it', async () => {
+      const { privateKey } = generateKeyPairSync('ed25519')
+      const jwk = privateKey.export({ format: 'jwk' }) as Kms.KmsJwkPrivateOkp
+      const publicJwk = Kms.PublicJwk.fromPublicJwk({ kty: 'OKP', crv: 'Ed25519', x: jwk.x })
+      const privateJwk = { ...jwk, kid: publicJwk.legacyKeyId } as Kms.KmsJwkPrivate
+
+      await agent.kms.importKey({ privateJwk })
+      const created = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { keyId: publicJwk.legacyKeyId, network: 'testnet' },
+      })
+      expect(created.didState.state).toBe('finished')
+      const did = created.didState.did as string
+
+      const importer = new Agent(getAgentOptions('Did importer', {}, {}, getCheqdModules(cheqdPayerSeeds[0])))
+      await importer.initialize()
+      try {
+        await importer.kms.importKey({ privateJwk })
+        await importer.dids.import({
+          did,
+          keys: [{ didDocumentRelativeKeyId: '#key-1', kmsKeyId: publicJwk.legacyKeyId }],
+        })
+
+        const document = (await importer.dids.resolve(did)).didDocument as DidDocument
+        document.service = [validService(did)]
+        const updated = await importer.dids.update<CheqdDidUpdateOptions>({ did, didDocument: document, options: {} })
+        expect(updated.didState, JSON.stringify(updated.didState)).toMatchObject({ state: 'finished' })
+      } finally {
+        await importer.shutdown()
+      }
+    })
+
+    it('cannot update a did it has no key for', async () => {
+      const created = await agent.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { createKey: { type: { kty: 'OKP', crv: 'Ed25519' } }, network: 'testnet' },
+      })
+      const did = created.didState.did as string
+
+      const stranger = new Agent(getAgentOptions('Did stranger', {}, {}, getCheqdModules(cheqdPayerSeeds[0])))
+      await stranger.initialize()
+      try {
+        await stranger.dids.import({ did })
+        const document = (await stranger.dids.resolve(did)).didDocument as DidDocument
+        document.service = [validService(did)]
+        const updated = await stranger.dids.update<CheqdDidUpdateOptions>({ did, didDocument: document, options: {} })
+        expect(updated.didState.state).toBe('failed')
+      } finally {
+        await stranger.shutdown()
+      }
+    })
+
     // Dids created by older versions use an Ed25519VerificationKey2018 method named by the key fingerprint, a key
     // stored under its legacy key id (the fingerprint), and a did record without key mappings.
     describe('created the way older versions did', () => {
