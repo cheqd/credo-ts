@@ -13,7 +13,7 @@ const jsonldWithHasValue = jsonld as typeof jsonld & {
 
 type JsonWebSignature2020Options = Pick<
   JwsLinkedDataSignatureOptions,
-  'key' | 'proof' | 'date' | 'useNativeCanonize' | 'LDKeyClass'
+  'key' | 'proof' | 'date' | 'useNativeCanonize' | 'LDKeyClass' | 'allowUndefinedTerms'
 >
 
 /**
@@ -35,6 +35,7 @@ export class JsonWebSignature2020 extends JwsLinkedDataSignature {
       proof: options.proof,
       date: options.date,
       useNativeCanonize: options.useNativeCanonize,
+      allowUndefinedTerms: options.allowUndefinedTerms,
     })
     this.requiredKeyType = 'JsonWebKey2020'
   }

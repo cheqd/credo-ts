@@ -105,7 +105,7 @@ export class W3cJsonLdCredentialService {
 
       await this.ensureCredentialIssuerTrusted(agentContext, options.credential, options.trustedIssuers)
 
-      const suites = this.getSignatureSuitesForCredential(agentContext, options.credential)
+      const suites = this.getSignatureSuitesForCredential(agentContext, options.credential, options.allowUndefinedTerms)
 
       const verifyOptions: Record<string, unknown> = {
         credential: JsonTransformer.toJSON(options.credential),
@@ -147,6 +147,7 @@ export class W3cJsonLdCredentialService {
           vcJs: {
             isValid,
             ...remainingResult,
+            ...(options.allowUndefinedTerms ? { undefinedTerms: collectUndefinedTerms(suites) } : {}),
           },
         },
         error: result.error,
@@ -229,6 +230,7 @@ export class W3cJsonLdCredentialService {
           },
           date: proof.created,
           useNativeCanonize: false,
+          allowUndefinedTerms: options.allowUndefinedTerms,
         })
       })
 
@@ -241,7 +243,7 @@ export class W3cJsonLdCredentialService {
       }
 
       const credentialSuites = credentials.map((credential) =>
-        this.getSignatureSuitesForCredential(agentContext, credential)
+        this.getSignatureSuitesForCredential(agentContext, credential, options.allowUndefinedTerms)
       )
       const allSuites = presentationSuites.concat(...credentialSuites)
 
@@ -324,6 +326,7 @@ export class W3cJsonLdCredentialService {
           vcJs: {
             isValid,
             ...remainingResult,
+            ...(options.allowUndefinedTerms ? { undefinedTerms: collectUndefinedTerms(allSuites) } : {}),
           },
           credentials: credentialValidations,
         },
@@ -525,7 +528,11 @@ export class W3cJsonLdCredentialService {
     return { suite, suiteInfo, keyPair, WalletKeyPair }
   }
 
-  private getSignatureSuitesForCredential(agentContext: AgentContext, credential: W3cJsonLdVerifiableCredential) {
+  private getSignatureSuitesForCredential(
+    agentContext: AgentContext,
+    credential: W3cJsonLdVerifiableCredential,
+    allowUndefinedTerms?: boolean
+  ) {
     const WalletKeyPair = createKmsKeyPairClass(agentContext)
 
     let proofs = credential.proof
@@ -543,6 +550,7 @@ export class W3cJsonLdCredentialService {
         },
         date: proof.created,
         useNativeCanonize: false,
+        allowUndefinedTerms,
       })
     })
   }
@@ -564,4 +572,9 @@ export class W3cJsonLdCredentialService {
       )
     }
   }
+}
+
+/** The terms without a definition that the suites found while verifying (see `allowUndefinedTerms`) */
+function collectUndefinedTerms(suites: { undefinedTerms?: Set<string> }[]) {
+  return Array.from(new Set(suites.flatMap((suite) => Array.from(suite.undefinedTerms ?? [])))).sort()
 }
