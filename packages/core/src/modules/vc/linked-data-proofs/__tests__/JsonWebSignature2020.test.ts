@@ -17,7 +17,6 @@ import {
 import {
   Ed25519PublicJwk,
   KeyManagementApi,
-  type KmsCreateKeyOptions,
   P256PublicJwk,
   P384PublicJwk,
   PublicJwk,
@@ -25,6 +24,7 @@ import {
 } from '../../../kms'
 import { JsonLdModuleConfig } from '../../jsonld'
 import { ClaimFormat, W3cCredential } from '../../models'
+import type { LinkedDataProof } from '../models/LinkedDataProof'
 import { W3cJsonLdVerifiableCredential } from '../models/W3cJsonLdVerifiableCredential'
 import { SignatureSuiteRegistry } from '../SignatureSuiteRegistry'
 import { JsonWebSignature2020 } from '../signature-suites'
@@ -61,7 +61,9 @@ const service = new W3cJsonLdCredentialService(
 
 let counter = 0
 // Creates a did whose only verification method is a JsonWebKey2020 for a new key in the KMS
-async function createIdentity(type: KmsCreateKeyOptions['type']) {
+async function createIdentity(
+  type: { kty: 'OKP'; crv: 'Ed25519' } | { kty: 'EC'; crv: 'P-256' | 'P-384' | 'secp256k1' }
+) {
   const kms = agentContext.resolve(KeyManagementApi)
   const key = await kms.createKey({ type })
   const did = `did:example:jws2020${counter++}`
@@ -148,7 +150,7 @@ describe('JsonWebSignature2020', () => {
         verificationMethod: verificationMethodId,
       })
 
-      const proof = Array.isArray(vc.proof) ? vc.proof[0] : vc.proof
+      const proof = (Array.isArray(vc.proof) ? vc.proof[0] : vc.proof) as LinkedDataProof
       expect(proof.type).toBe('JsonWebSignature2020')
       expect(JsonEncoder.fromBase64Url(proof.jws?.split('.')[0] as string)).toEqual({
         alg,
