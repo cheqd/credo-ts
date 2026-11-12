@@ -65,10 +65,7 @@ export class CheqdApi {
   }
 
   /** @see {@link updateLegacyStatusList} */
-  public async updateLegacyStatusList(
-    did: string,
-    options: { name: string; resourceType: string; updates: { index: number; value: number }[] }
-  ) {
+  public async updateLegacyStatusList(did: string, options: Parameters<typeof updateLegacyStatusList>[2]) {
     return await updateLegacyStatusList(this.agentContext, did, options)
   }
 

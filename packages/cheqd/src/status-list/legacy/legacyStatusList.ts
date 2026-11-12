@@ -506,13 +506,32 @@ export async function createLegacyStatusList(
 export async function updateLegacyStatusList(
   agentContext: AgentContext,
   did: string,
-  options: { name: string; resourceType: string; updates: { index: number; value: number }[] }
+  options: ({ name: string; resourceType: string } | { resourceId: string }) & {
+    updates: { index: number; value: number }[]
+  }
 ) {
-  const uri = getLegacyStatusListUri({ did, name: options.name, resourceType: options.resourceType })
   const resolver = agentContext.dependencyManager.resolve(CheqdDidResolver)
+
+  // A resource id is only used to find the list: it may be an older version, and writing on top of it would drop
+  // the changes made since. The update is always based on the latest version of the list.
+  let name: string
+  let resourceType: string
+  if ('resourceId' in options) {
+    const byId = await resolver.resolveResource(agentContext, `${did}/resources/${options.resourceId}`)
+    if (byId.error || byId.resource === undefined || !byId.resourceMetadata) {
+      throw new CredoError(
+        `Unable to read the status list ${did}/resources/${options.resourceId}: ${byId.message ?? byId.error}`
+      )
+    }
+    ;({ name, resourceType } = byId.resourceMetadata)
+  } else {
+    ;({ name, resourceType } = options)
+  }
+
+  const uri = getLegacyStatusListUri({ did, name, resourceType })
   const result = await resolver.resolveResource(
     agentContext,
-    `${did}?resourceName=${encodeURIComponent(options.name)}&resourceType=${encodeURIComponent(options.resourceType)}`
+    `${did}?resourceName=${encodeURIComponent(name)}&resourceType=${encodeURIComponent(resourceType)}`
   )
   if (result.error || result.resource === undefined) {
     throw new CredoError(`Unable to read the status list ${uri}: ${result.message ?? result.error}`)
@@ -527,5 +546,6 @@ export async function updateLegacyStatusList(
   if (data.StatusList2021) data.StatusList2021.encodedList = encodedList
   else (data.bitstringStatusListCredential.credentialSubject as { encodedList: string }).encodedList = encodedList
 
-  return await publish(agentContext, did, { name: options.name, resourceType: options.resourceType, data })
+  const { resourceId } = await publish(agentContext, did, { name, resourceType, data })
+  return { resourceId, name, resourceType }
 }
