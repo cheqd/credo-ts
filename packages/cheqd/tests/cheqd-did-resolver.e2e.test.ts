@@ -173,6 +173,19 @@ describe('Cheqd DID resolver', () => {
       expect(result.resource).toEqual({ n: 1 })
     })
 
+    it('returns notFound for a time before the first version', async () => {
+      const first = await resolve('resourceName=Versioned%20Name&resourceType=versioned&version=v1')
+      if (!first.resourceMetadata) throw new Error('Expected resource metadata')
+      const beforeFirst = Math.floor(first.resourceMetadata.created.getTime() / 1000) - 3600
+
+      // nothing was current yet: the resolver must not fall back to the nearest later version
+      const result = await resolve(
+        `resourceName=Versioned%20Name&resourceType=versioned&resourceVersionTime=${beforeFirst}`
+      )
+      expect(result.error).toBe('notFound')
+      expect(result.resource).toBeUndefined()
+    })
+
     it('resolves a name that was written with a literal percent sequence', async () => {
       // decoded it is 'Literal Percent', which does not exist, so the literal name is used
       const literal = await resolve('resourceName=Literal%20Percent&resourceType=versioned')

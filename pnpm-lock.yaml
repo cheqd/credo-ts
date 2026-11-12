@@ -174,8 +174,8 @@ catalogs:
       specifier: 2.5.14
       version: 2.5.14
     '@cheqd/sdk':
-      specifier: npm:@cheqd/sdk-esm@5.5.1
-      version: 5.5.1
+      specifier: npm:@cheqd/sdk-esm@5.6.0
+      version: 5.6.0
     '@cheqd/ts-proto':
       specifier: ^4.2.0
       version: 4.2.1
@@ -667,7 +667,7 @@ importers:
     dependencies:
       '@cheqd/sdk':
         specifier: 'catalog:'
-        version: '@cheqd/sdk-esm@5.5.1(supports-color@8.1.1)'
+        version: '@cheqd/sdk-esm@5.6.0(supports-color@8.1.1)'
       '@cheqd/ts-proto':
         specifier: 'catalog:'
         version: 4.2.1
@@ -1874,8 +1874,8 @@ packages:
     resolution: {integrity: sha512-q/ThtP9gcnEP6xlv7LrY26C2mHqdGBti/MmOVngt/M/oIGYkssmQGxPK9WzBNt2juVcH/vml2WQ+ra8LXYOTaA==}
     engines: {node: ^22.11 || ^24 || >=26}
 
-  '@cheqd/sdk-esm@5.5.1':
-    resolution: {integrity: sha512-9hFB99oilyNU7sCgMJ/VS0uNqHRdbXt/i9ruH1pqwgaue4Z9jgeRemY6l32Men88m9Grozoax27Z7Y/3OyXmsw==}
+  '@cheqd/sdk-esm@5.6.0':
+    resolution: {integrity: sha512-BUydLsHJZ7m29MJCde+3g7CCcQkhfyiH0JOrhiF1ItiPbCrNfiJETtpgf2ICqbROubKKnzmSGg+65rgHypSMfg==}
     engines: {node: '>=22.0.0'}
 
   '@cheqd/ts-proto@4.2.1':
@@ -8309,7 +8309,7 @@ snapshots:
       '@changesets/types': 7.0.0
       human-id: 4.2.2
 
-  '@cheqd/sdk-esm@5.5.1(supports-color@8.1.1)':
+  '@cheqd/sdk-esm@5.6.0(supports-color@8.1.1)':
     dependencies:
       '@cheqd/ts-proto': 4.2.1
       '@cosmjs/amino': 0.36.2
