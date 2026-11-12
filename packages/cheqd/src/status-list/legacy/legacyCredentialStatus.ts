@@ -38,6 +38,9 @@ function messageValue(messages: LegacyStatusMessage[] | undefined, message: stri
  * - StatusList2021: `revoke` needs a revocation entry and sets it, `suspend` needs a suspension entry and sets it,
  *   `reinstate` clears a suspension entry. A revocation is not undone.
  * - Bitstring: revoke is the value of the message `revoked` (1), suspend of `suspended` (2), reinstate is 0.
+ *
+ * An entry may name its list by resource id. The change is still written to the latest version of that list, but the
+ * entry keeps pointing at the old, immutable version (`pinned`).
  */
 export async function setLegacyCredentialStatus(
   agentContext: AgentContext,
@@ -57,13 +60,13 @@ export async function setLegacyCredentialStatus(
     resourceId: string
     indices: number[]
     value: number
+    /** The entry names one version of the list, so it still reads the old version and the credential will not read as changed */
+    pinned: boolean
   }[] = []
 
   for (const entry of entries) {
     const list = parseLegacyStatusListUri(entry.statusListCredential)
-    if (!list || 'resourceId' in list) {
-      throw new CredoError('The status list of the credential must be named by its name and type to be updated')
-    }
+    if (!list) throw new CredoError(`'${entry.statusListCredential}' is not the uri of a did:cheqd status list`)
     if (list.did !== issuerDid) {
       throw new CredoError(`The status list is a resource of ${list.did}, not of the issuer ${issuerDid}`)
     }
@@ -87,12 +90,14 @@ export async function setLegacyCredentialStatus(
     }
 
     const indices = expandLegacyStatusIndices(entry, options.maxIndices)
-    const { resourceId } = await updateLegacyStatusList(agentContext, list.did, {
-      name: list.name,
-      resourceType: list.resourceType,
-      updates: indices.map((index) => ({ index, value })),
-    })
-    written.push({ did: list.did, name: list.name, resourceType: list.resourceType, resourceId, indices, value })
+    const updates = indices.map((index) => ({ index, value }))
+    const pinned = 'resourceId' in list
+    const updated = await updateLegacyStatusList(
+      agentContext,
+      list.did,
+      pinned ? { resourceId: list.resourceId, updates } : { name: list.name, resourceType: list.resourceType, updates }
+    )
+    written.push({ did: list.did, ...updated, indices, value, pinned })
   }
 
   return written

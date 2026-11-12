@@ -465,6 +465,48 @@ describe('StatusList2021 and Bitstring status lists stored as did:cheqd linked r
       )
     })
 
+    it('updates a list named by resource id on top of its latest version, and flags that the entry stays pinned', async () => {
+      const created = await sdk().createLegacyStatusList(did, {
+        format: 'StatusList2021',
+        name: 'pinned revocation',
+        statusPurpose: 'revocation',
+      })
+      const entryFor = (statusListCredential: string, index: number) => ({
+        issuer: did,
+        credentialStatus: createLegacyStatusEntry({
+          format: 'StatusList2021',
+          statusListCredential,
+          statusPurpose: 'revocation',
+          index,
+        }),
+      })
+      const pinned = entryFor(`${did}/resources/${created.resourceId}`, 7)
+      const named = entryFor(created.uri, 8)
+
+      // a later change by name moves the latest version on; the pinned entry is now based on an older version
+      await sdk().updateLegacyStatusList(did, {
+        name: 'pinned revocation',
+        resourceType: 'StatusList2021Revocation',
+        updates: [{ index: 8, value: 1 }],
+      })
+
+      const written = await sdk().setLegacyCredentialStatus(pinned, 'revoke')
+      expect(written).toMatchObject([{ did, name: 'pinned revocation', indices: [7], value: 1, pinned: true }])
+      expect(written[0].resourceId).not.toBe(created.resourceId)
+
+      // the change did not drop the earlier one, because it was written on the latest version...
+      expect(await check(named)).toMatchObject([{ revoked: true, resourceId: written[0].resourceId }])
+      // ...and the pinned entry still reads the version it names, which has neither change
+      expect(await check(pinned)).toMatchObject([{ revoked: false, valid: true, resourceId: created.resourceId }])
+
+      expect(
+        await sdk().updateLegacyStatusList(did, { resourceId: created.resourceId, updates: [{ index: 9, value: 1 }] })
+      ).toMatchObject({ name: 'pinned revocation', resourceType: 'StatusList2021Revocation' })
+      await expect(
+        sdk().updateLegacyStatusList(did, { resourceId: '00000000-0000-4000-8000-000000000000', updates: [] })
+      ).rejects.toThrow('Unable to read the status list')
+    })
+
     it('writes the values Studio uses to a Bitstring list, for an entry with several indices', async () => {
       const list = await sdk().createLegacyStatusList(did, {
         format: 'BitstringStatusList',
