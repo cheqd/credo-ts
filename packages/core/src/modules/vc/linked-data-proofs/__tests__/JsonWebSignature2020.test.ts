@@ -125,6 +125,45 @@ describe('JsonWebSignature2020', () => {
       expect((await verify(changed)).isValid).toBe(false)
     })
 
+    describe('with allowUndefinedTerms', () => {
+      const verifyLenient = async (credential: unknown) => {
+        const result = await service.verifyCredential(agentContext, {
+          credential: JsonTransformer.fromJSON(credential, W3cJsonLdVerifiableCredential),
+          allowUndefinedTerms: true,
+        })
+        return {
+          isValid: result.isValid,
+          undefinedTerms: (result.validations.vcJs as { undefinedTerms?: string[] } | undefined)?.undefinedTerms,
+        }
+      }
+
+      it('verifies a credential with an undefined term and lists the term', async () => {
+        expect(await verifyLenient(undefinedTerms)).toEqual({ isValid: true, undefinedTerms: ['name'] })
+      })
+
+      // This is the hazard, shown on purpose: the value of the undefined term is not signed, so changing it does not
+      // invalidate the credential. The caller must treat every listed term as unverified.
+      it('still verifies when the value of the undefined term is changed, and still lists the term', async () => {
+        const changed = JSON.parse(JSON.stringify(undefinedTerms))
+        changed.credentialSubject.name = 'Mallory'
+        expect(await verifyLenient(changed)).toEqual({ isValid: true, undefinedTerms: ['name'] })
+      })
+
+      it('lists nothing and still protects every claim for a credential whose terms are all defined', async () => {
+        expect(await verifyLenient(definedTerms)).toEqual({ isValid: true, undefinedTerms: [] })
+
+        const changed = JSON.parse(JSON.stringify(definedTerms))
+        changed.credentialSubject.name = 'Mallory'
+        expect((await verifyLenient(changed)).isValid).toBe(false)
+      })
+
+      it('does not accept a changed signature, whatever the terms', async () => {
+        const changed = JSON.parse(JSON.stringify(undefinedTerms))
+        changed.proof.jws = `${changed.proof.jws.slice(0, -4)}AAAA`
+        expect((await verifyLenient(changed)).isValid).toBe(false)
+      })
+    })
+
     // Veramo accepts these, including with a changed claim, because the claim is not covered by the signature.
     // Credo's JSON-LD verification is strict and refuses them.
     it('does not verify when a claim is not defined by any context', async () => {
