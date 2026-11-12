@@ -2,11 +2,16 @@ import { AgentContext, injectable } from '@credo-ts/core'
 
 import { type CheqdCreateResourceOptions, CheqdDidRegistrar, CheqdDidResolver } from './dids'
 import {
+  type CreateLegacyStatusListOptions,
+  checkLegacyCredentialStatus,
+  createLegacyStatusList,
   fetchTokenStatusList,
   getTokenStatusListUri,
+  type LegacyStatusEntry,
   type PublishTokenStatusListOptions,
   publishTokenStatusList,
   type TokenStatusListUriOptions,
+  updateLegacyStatusList,
 } from './status-list'
 
 @injectable()
@@ -40,5 +45,26 @@ export class CheqdApi {
   /** @see {@link getTokenStatusListUri} */
   public getTokenStatusListUri(options: TokenStatusListUriOptions) {
     return getTokenStatusListUri(options)
+  }
+
+  /** @see {@link checkLegacyCredentialStatus} */
+  public async checkLegacyCredentialStatus(
+    credential: { issuer: string | { id: string }; credentialStatus?: LegacyStatusEntry | LegacyStatusEntry[] },
+    options?: { requireIssuerMatch?: boolean }
+  ) {
+    return await checkLegacyCredentialStatus(this.agentContext, credential, options)
+  }
+
+  /** @see {@link createLegacyStatusList} */
+  public async createLegacyStatusList(did: string, options: CreateLegacyStatusListOptions) {
+    return await createLegacyStatusList(this.agentContext, did, options)
+  }
+
+  /** @see {@link updateLegacyStatusList} */
+  public async updateLegacyStatusList(
+    did: string,
+    options: { name: string; resourceType: string; updates: { index: number; value: number }[] }
+  ) {
+    return await updateLegacyStatusList(this.agentContext, did, options)
   }
 }

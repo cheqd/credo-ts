@@ -2,7 +2,7 @@ import { Agent, Kms, SdJwtVcModule, StatusListCwt, X509Service } from '@credo-ts
 
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions } from '../src'
-import { createCheqdStatusListFetcher } from '../src'
+import { createCheqdStatusListFetcher, createLegacyStatusEntry } from '../src'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 
 // Payer seed [4] is unused elsewhere, and shared by the describes in this file, which run in order. The holder has no
@@ -241,5 +241,160 @@ describe('Token Status List stored as a did:cheqd linked resource', () => {
 
   it('fails for a list that was never published', async () => {
     await expect(verifier.modules.cheqdSdk.fetchTokenStatusList(did, 'never published')).rejects.toThrow()
+  })
+})
+
+describe('StatusList2021 and Bitstring status lists stored as did:cheqd linked resources', () => {
+  let issuer: Agent<ReturnType<typeof getCheqdModules>>
+  let did: string
+  let otherDid: string
+
+  beforeAll(async () => {
+    issuer = new Agent(getAgentOptions('Legacy status list issuer', {}, {}, getCheqdModules(cheqdPayerSeeds[4])))
+    await issuer.initialize()
+    const create = async () => {
+      const created = await issuer.dids.create<CheqdDidCreateOptions>({
+        method: 'cheqd',
+        options: { createKey: { type: { kty: 'EC', crv: 'P-256' } }, network: 'testnet' },
+      })
+      expect(created.didState.state).toBe('finished')
+      return created.didState.did as string
+    }
+    did = await create()
+    otherDid = await create()
+  })
+
+  afterAll(async () => {
+    await issuer.shutdown()
+  })
+
+  const check = (credential: Parameters<typeof issuer.modules.cheqdSdk.checkLegacyCredentialStatus>[0]) =>
+    issuer.modules.cheqdSdk.checkLegacyCredentialStatus(credential)
+
+  it('creates a StatusList2021 revocation list, checks an entry, and sees it revoked after an update', async () => {
+    const { uri, resourceType } = await issuer.modules.cheqdSdk.createLegacyStatusList(did, {
+      format: 'StatusList2021',
+      name: 'revocation list',
+      statusPurpose: 'revocation',
+    })
+    expect(resourceType).toBe('StatusList2021Revocation')
+
+    const entry = createLegacyStatusEntry({
+      format: 'StatusList2021',
+      statusListCredential: uri,
+      statusPurpose: 'revocation',
+      index: 42,
+    })
+    const credential = { issuer: { id: did }, credentialStatus: entry }
+
+    expect(await check(credential)).toMatchObject([{ status: 0, valid: true, revoked: false, statusListIndex: 42 }])
+
+    await issuer.modules.cheqdSdk.updateLegacyStatusList(did, {
+      name: 'revocation list',
+      resourceType,
+      updates: [{ index: 42, value: 1 }],
+    })
+
+    expect(await check(credential)).toMatchObject([{ status: 1, valid: false, revoked: true, suspended: false }])
+    // other entries are untouched
+    expect(await check({ issuer: did, credentialStatus: { ...entry, statusListIndex: '43' } })).toMatchObject([
+      { valid: true, revoked: false },
+    ])
+
+    // and the entry can be reinstated
+    await issuer.modules.cheqdSdk.updateLegacyStatusList(did, {
+      name: 'revocation list',
+      resourceType,
+      updates: [{ index: 42, value: 0 }],
+    })
+    expect(await check(credential)).toMatchObject([{ valid: true, revoked: false }])
+  })
+
+  it('creates a Bitstring list with 2 bits per entry, and tells revoked from suspended', async () => {
+    const { uri, resourceType } = await issuer.modules.cheqdSdk.createLegacyStatusList(did, {
+      format: 'BitstringStatusList',
+      name: 'bitstring list',
+      signerDidUrl: `${did}#key-1`,
+    })
+    expect(resourceType).toBe('BitstringStatusListCredential')
+
+    const entryFor = (index: number, statusPurpose: 'revocation' | 'suspension' | 'message') =>
+      createLegacyStatusEntry({ format: 'BitstringStatusList', statusListCredential: uri, statusPurpose, index })
+
+    await issuer.modules.cheqdSdk.updateLegacyStatusList(did, {
+      name: 'bitstring list',
+      resourceType,
+      updates: [
+        { index: 10, value: 1 },
+        { index: 11, value: 2 },
+      ],
+    })
+
+    expect(await check({ issuer: did, credentialStatus: entryFor(10, 'message') })).toMatchObject([
+      { status: 1, message: 'revoked', revoked: true, suspended: false },
+    ])
+    expect(await check({ issuer: did, credentialStatus: entryFor(11, 'message') })).toMatchObject([
+      { status: 2, message: 'suspended', revoked: false, suspended: true },
+    ])
+    expect(await check({ issuer: did, credentialStatus: entryFor(12, 'revocation') })).toMatchObject([
+      { status: 0, valid: true, message: 'valid' },
+    ])
+  })
+
+  it('refuses a list that is not a resource of the issuer of the credential', async () => {
+    const { uri } = await issuer.modules.cheqdSdk.createLegacyStatusList(did, {
+      format: 'StatusList2021',
+      name: 'issuer binding',
+      statusPurpose: 'suspension',
+    })
+    const entry = createLegacyStatusEntry({
+      format: 'StatusList2021',
+      statusListCredential: uri,
+      statusPurpose: 'suspension',
+      index: 1,
+    })
+
+    await expect(check({ issuer: otherDid, credentialStatus: entry })).rejects.toThrow('not of the issuer')
+    // checking with the issuer works
+    await expect(check({ issuer: did, credentialStatus: entry })).resolves.toMatchObject([{ valid: true }])
+  })
+
+  it('refuses a purpose the list does not have, an index outside the list, and a url that is not a did:cheqd list', async () => {
+    const { uri } = await issuer.modules.cheqdSdk.createLegacyStatusList(did, {
+      format: 'StatusList2021',
+      name: 'purpose and range',
+      statusPurpose: 'revocation',
+    })
+    const entry = createLegacyStatusEntry({
+      format: 'StatusList2021',
+      statusListCredential: uri,
+      statusPurpose: 'revocation',
+      index: 0,
+    })
+
+    await expect(check({ issuer: did, credentialStatus: { ...entry, statusPurpose: 'suspension' } })).rejects.toThrow(
+      "does not have the purpose 'suspension'"
+    )
+    await expect(check({ issuer: did, credentialStatus: { ...entry, statusListIndex: '140000' } })).rejects.toThrow(
+      'out of range'
+    )
+    await expect(
+      check({ issuer: did, credentialStatus: { ...entry, statusListCredential: 'https://example.com/status/1' } })
+    ).rejects.toThrow('not the uri of a did:cheqd status list')
+  })
+
+  it('refuses a list of the other format than the entry says', async () => {
+    const { uri } = await issuer.modules.cheqdSdk.createLegacyStatusList(did, {
+      format: 'StatusList2021',
+      name: 'format mismatch',
+      statusPurpose: 'revocation',
+    })
+    const entry = createLegacyStatusEntry({
+      format: 'BitstringStatusList',
+      statusListCredential: uri,
+      statusPurpose: 'revocation',
+      index: 0,
+    })
+    await expect(check({ issuer: did, credentialStatus: entry })).rejects.toThrow('not a Bitstring list')
   })
 })
