@@ -3,6 +3,7 @@ import {
   createLegacyStatusEntry,
   decodeBitstring,
   encodeBitstring,
+  expandLegacyStatusIndices,
   getBitstringStatus,
   getLegacyStatusListUri,
   parseLegacyStatusListData,
@@ -191,5 +192,51 @@ describe('createLegacyStatusEntry', () => {
       statusSize: 2,
     })
     expect(entry.statusMessage?.map((message) => message.message)).toEqual(['valid', 'revoked', 'suspended', 'unknown'])
+  })
+})
+
+describe('expandLegacyStatusIndices', () => {
+  it('is the single index', () => {
+    expect(expandLegacyStatusIndices({ statusListIndex: '42' })).toEqual([42])
+    expect(expandLegacyStatusIndices({ statusListIndex: 0 })).toEqual([0])
+  })
+
+  it('reads a list of numbers, numeric strings and ranges, each index once and in order', () => {
+    expect(expandLegacyStatusIndices({ statusListIndices: [5, '7', '10-12', 6, '11-13'] })).toEqual([
+      5, 7, 10, 11, 12, 6, 13,
+    ])
+  })
+
+  it('reads a range, whichever end is first', () => {
+    expect(expandLegacyStatusIndices({ statusListRangeStart: 3, statusListRangeEnd: 5 })).toEqual([3, 4, 5])
+    expect(expandLegacyStatusIndices({ statusListIndices: ['9-7'] })).toEqual([7, 8, 9])
+  })
+
+  it('combines the single index, the list and the range', () => {
+    expect(
+      expandLegacyStatusIndices({
+        statusListIndex: 1,
+        statusListIndices: [2],
+        statusListRangeStart: 3,
+        statusListRangeEnd: 4,
+      })
+    ).toEqual([1, 2, 3, 4])
+  })
+
+  it('refuses an entry that asks about too many indices, before reading them', () => {
+    expect(() => expandLegacyStatusIndices({ statusListRangeStart: 0, statusListRangeEnd: 1_000_000 })).toThrow(
+      'more than 10000 indices'
+    )
+    expect(() => expandLegacyStatusIndices({ statusListIndices: ['0-50000'] })).toThrow('more than 10000 indices')
+    expect(() => expandLegacyStatusIndices({ statusListRangeStart: 0, statusListRangeEnd: 5 }, 3)).toThrow(
+      'more than 3 indices'
+    )
+  })
+
+  it('refuses an entry without an index, a half range, and an invalid index', () => {
+    expect(() => expandLegacyStatusIndices({})).toThrow('has no index')
+    expect(() => expandLegacyStatusIndices({ statusListRangeStart: 3 })).toThrow('both statusListRangeStart')
+    expect(() => expandLegacyStatusIndices({ statusListIndex: 'x' })).toThrow('Invalid status list index')
+    expect(() => expandLegacyStatusIndices({ statusListIndices: [-1] })).toThrow('Invalid status list index')
   })
 })

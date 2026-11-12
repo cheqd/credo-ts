@@ -4,12 +4,16 @@ import { type CheqdCreateResourceOptions, CheqdDidRegistrar, CheqdDidResolver } 
 import {
   type CreateLegacyStatusListOptions,
   checkLegacyCredentialStatus,
+  checkLegacyPresentationStatus,
   createLegacyStatusList,
   fetchTokenStatusList,
   getTokenStatusListUri,
+  type LegacyStatusAction,
+  type LegacyStatusCredential,
   type LegacyStatusEntry,
   type PublishTokenStatusListOptions,
   publishTokenStatusList,
+  setLegacyCredentialStatus,
   type TokenStatusListUriOptions,
   updateLegacyStatusList,
 } from './status-list'
@@ -66,5 +70,17 @@ export class CheqdApi {
     options: { name: string; resourceType: string; updates: { index: number; value: number }[] }
   ) {
     return await updateLegacyStatusList(this.agentContext, did, options)
+  }
+
+  /** @see {@link setLegacyCredentialStatus} */
+  public async setLegacyCredentialStatus(credential: LegacyStatusCredential, action: LegacyStatusAction) {
+    return await setLegacyCredentialStatus(this.agentContext, credential, action)
+  }
+
+  /** @see {@link checkLegacyPresentationStatus} */
+  public async checkLegacyPresentationStatus(presentation: {
+    verifiableCredential?: LegacyStatusCredential | LegacyStatusCredential[]
+  }) {
+    return await checkLegacyPresentationStatus(this.agentContext, presentation)
   }
 }

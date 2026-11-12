@@ -6,6 +6,13 @@ export {
   setBitstringStatus,
 } from './bitstring'
 export {
+  checkLegacyPresentationStatus,
+  type LegacyPresentationStatus,
+  type LegacyStatusAction,
+  type LegacyStatusCredential,
+  setLegacyCredentialStatus,
+} from './legacyCredentialStatus'
+export {
   allocateStatusListIndex,
   type CreateLegacyStatusListOptions,
   checkLegacyCredentialStatus,
@@ -15,7 +22,9 @@ export {
   defaultBitstringStatusMessages,
   defaultBitstringStatusSize,
   defaultLegacyStatusListResolverUrl,
+  defaultMaxStatusIndices,
   defaultStatusList2021Length,
+  expandLegacyStatusIndices,
   fetchLegacyStatusList,
   getLegacyStatusListUri,
   type LegacyStatusEntry,
