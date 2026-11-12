@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 import { Agent, Kms, SdJwtVcModule, StatusListCwt, X509Service } from '@credo-ts/core'
 
 import { getAgentOptions } from '../../core/tests/helpers'
@@ -200,6 +202,22 @@ describe('Token Status List stored as a did:cheqd linked resource', () => {
 
     const fetched = await verifier.modules.cheqdSdk.fetchTokenStatusList(did, statusListName)
     expect(fetched).toMatchObject({ format: 'jwt', statusList: updated.statusList })
+  })
+
+  it('needs a gas limit for a large list', async () => {
+    // Incompressible, about 40 KB: more than the 1,000,000 gas the SDK sets by default (about 41 gas per byte)
+    const statusList = randomBytes(30_000).toString('base64url')
+
+    await expect(
+      issuer.modules.cheqdSdk.publishTokenStatusList(did, { name: 'large list', statusList })
+    ).rejects.toThrow(/out of gas/)
+
+    const { resourceId } = await issuer.modules.cheqdSdk.publishTokenStatusList(did, {
+      name: 'large list',
+      statusList,
+      feeOptions: { slippageBps: 1000, gasLimit: '3000000' },
+    })
+    expect(resourceId).toBeDefined()
   })
 
   it('publishes a CWT list and reads it back as the same bytes', async () => {

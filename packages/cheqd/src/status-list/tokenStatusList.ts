@@ -1,3 +1,4 @@
+import type { DidFeeOptions, DidStdFee } from '@cheqd/sdk'
 import type { AgentContext, CustomStatusListFetcher } from '@credo-ts/core'
 import { CredoError, TypedArrayEncoder, utils } from '@credo-ts/core'
 
@@ -69,6 +70,10 @@ export interface PublishTokenStatusListOptions {
   name: string
   /** Version label of this version of the list. Defaults to the current time. */
   version?: string
+  /** Fee for the transaction. Defaults to the SDK's. */
+  fee?: DidStdFee
+  /** Set `gasLimit` for a list over about 20 KB: the SDK's default is 1,000,000 gas and a list costs about 41 gas per byte */
+  feeOptions?: DidFeeOptions
 }
 
 /** Publishes a signed Token Status List as a new version of a linked resource of the did. The did must be controlled by this agent. */
@@ -84,6 +89,8 @@ export async function publishTokenStatusList(
     name: options.name,
     resourceType: tokenStatusListResourceType,
     version: options.version ?? new Date().toISOString(),
+    fee: options.fee,
+    feeOptions: options.feeOptions,
     // As bytes: a string would be decoded as base64
     data:
       typeof options.statusList === 'string'
