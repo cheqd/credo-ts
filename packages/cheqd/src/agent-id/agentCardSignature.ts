@@ -58,14 +58,20 @@ export type AgentCardSignatureVerification =
 /**
  * Verifies a signature over the canonical payload of an agent card. The key is found by resolving the DID URL in the
  * `kid` of the protected header, with any DID method the agent can resolve. The key must be listed for
- * authentication or assertion in the DID document.
+ * authentication or assertion in the DID document, and the DID must not be deactivated.
  *
- * A valid result means the card was signed by a key of that DID. Whether that DID is the one you expect, or trusted,
- * is up to the caller: compare `didUrl` with the DID you have the card from.
+ * `expectedDid` is the DID you already trust the card to come from (e.g. the DID you discovered the card through, or
+ * the DID of the agent you expect to be talking to). The signer DID parsed from `kid` is compared against it
+ * *before* anything is resolved: a mismatch is rejected immediately. This is a required parameter, not an
+ * afterthought the caller is trusted to apply themselves, because without it this function would resolve an
+ * attacker-chosen DID URL on request. If that DID method is backed by a network resolver (e.g. `did:web`, or any
+ * method handled by a configured `UniversalDidResolver`), that resolution is a blind, caller-triggered HTTP(S)
+ * request to a host the attacker picked — an SSRF primitive, including against internal hosts/ports. Passing the
+ * `expectedDid` you already trust closes that off: a mismatched DID is never resolved at all.
  */
 export async function verifyAgentCardSignature(
   agentContext: AgentContext,
-  options: { payload: string; signature: AgentCardSignature }
+  options: { payload: string; signature: AgentCardSignature; expectedDid: string }
 ): Promise<AgentCardSignatureVerification> {
   const jws = `${options.signature.protected}.${TypedArrayEncoder.toBase64Url(
     TypedArrayEncoder.fromUtf8String(options.payload)
@@ -79,15 +85,30 @@ export async function verifyAgentCardSignature(
     }
     didUrl = kid
 
+    // Enforce the binding to the expected signer BEFORE resolving anything. This is what stops a caller-supplied
+    // kid from causing resolution (and, for did:web/UniversalDidResolver-backed methods, a network fetch) of a DID
+    // the caller never asked to trust.
+    const signerDid = didUrl.split('#')[0]
+    if (signerDid !== options.expectedDid) {
+      return {
+        isValid: false,
+        didUrl,
+        error: `The signature's kid (${didUrl}) is for ${signerDid}, which does not match the expected DID ${options.expectedDid}`,
+      }
+    }
+
     const result = await agentContext.dependencyManager.resolve(JwsService).verifyJws(agentContext, {
       jws,
       allowedJwsSignerMethods: ['did'],
       resolveJwsSigner: async ({ protectedHeader }) => {
         const signerDidUrl = protectedHeader.kid as string
-        const { didDocument } = await agentContext.dependencyManager
+        const { didDocument, didDocumentMetadata } = await agentContext.dependencyManager
           .resolve(DidsApi)
           .resolve(signerDidUrl.split('#')[0])
         if (!didDocument) throw new CredoError(`Unable to resolve ${signerDidUrl}`)
+        if (didDocumentMetadata.deactivated) {
+          throw new CredoError(`${signerDidUrl.split('#')[0]} is deactivated`)
+        }
 
         const verificationMethod = didDocument.dereferenceKey(signerDidUrl, ['authentication', 'assertionMethod'])
         return { method: 'did', didUrl: signerDidUrl, jwk: getPublicJwkFromVerificationMethod(verificationMethod) }
