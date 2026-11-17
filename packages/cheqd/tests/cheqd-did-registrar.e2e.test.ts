@@ -633,7 +633,11 @@ describe('Agent card signed by a P-256 did:cheqd', () => {
     const signature = await signAgentCardPayload(signer.context, { didUrl, payload })
     card.signatures = [{ ...signature, header: {} }]
 
-    expect(await verifyAgentCardSignature(verifier.context, { payload, signature })).toEqual({ isValid: true, didUrl })
+    const expectedDid = created.didState.did as string
+    expect(await verifyAgentCardSignature(verifier.context, { payload, signature, expectedDid })).toEqual({
+      isValid: true,
+      didUrl,
+    })
 
     await expect(
       verifyWithA2aSdk(async (kid) => {
@@ -643,7 +647,11 @@ describe('Agent card signed by a P-256 did:cheqd', () => {
       })(card)
     ).resolves.toBeUndefined()
 
-    const tampered = await verifyAgentCardSignature(verifier.context, { payload: `${payload} `, signature })
+    const tampered = await verifyAgentCardSignature(verifier.context, {
+      payload: `${payload} `,
+      signature,
+      expectedDid,
+    })
     expect(tampered.isValid).toBe(false)
   })
 })
