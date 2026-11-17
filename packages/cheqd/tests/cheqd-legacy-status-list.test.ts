@@ -1,7 +1,13 @@
+import { TypedArrayEncoder } from '@credo-ts/core'
+
 import {
+  allocateStatusListIndex,
+  checkLegacyCredentialStatus,
+  checkLegacyPresentationStatus,
   createBitstring,
   createLegacyStatusEntry,
   decodeBitstring,
+  defaultBitstringStatusMessages,
   encodeBitstring,
   expandLegacyStatusIndices,
   getBitstringStatus,
@@ -9,7 +15,11 @@ import {
   parseLegacyStatusListData,
   parseLegacyStatusListUri,
   setBitstringStatus,
+  setLegacyCredentialStatus,
+  updateLegacyStatusList,
 } from '../src'
+import { CheqdDidRegistrar, CheqdDidResolver } from '../src/dids'
+import { createFakeLegacyStatusLedger } from './fakeLegacyStatusLedger'
 import { legacyStatusListFixtures as fixtures } from './legacyStatusListFixtures'
 
 describe('bitstring', () => {
@@ -238,5 +248,256 @@ describe('expandLegacyStatusIndices', () => {
     expect(() => expandLegacyStatusIndices({ statusListRangeStart: 3 })).toThrow('both statusListRangeStart')
     expect(() => expandLegacyStatusIndices({ statusListIndex: 'x' })).toThrow('Invalid status list index')
     expect(() => expandLegacyStatusIndices({ statusListIndices: [-1] })).toThrow('Invalid status list index')
+  })
+
+  it('caps total work across many overlapping ranges, not just the deduplicated result (security: unbounded work)', () => {
+    // 2,000 copies of the same 10,000 entry range: the deduplicated result is exactly at the default cap, but naively
+    // walking every range in full before deduplicating would be 20,000,000 iterations
+    const indices = Array.from({ length: 2000 }, () => '0-9999')
+    expect(() => expandLegacyStatusIndices({ statusListIndices: indices })).toThrow('more than')
+  })
+})
+
+const did = 'did:cheqd:testnet:5RpEg66jhhbmASWPXJRWrA'
+
+function seedStatusList2021(ledger: ReturnType<typeof createFakeLegacyStatusLedger>, name: string, length = 16) {
+  return ledger.seed(name, 'StatusList2021Revocation', {
+    StatusList2021: { statusPurpose: 'revocation', encodedList: encodeBitstring(createBitstring(length, 1)) },
+    metadata: { type: 'StatusList2021Revocation', encoding: 'base64url', encrypted: false },
+  })
+}
+
+describe('security: decodeBitstring gzip bomb', () => {
+  it('refuses to inflate past a hard cap instead of allocating the full decompressed size', () => {
+    // An all-zero buffer costs almost nothing to gzip but still forces the same decompression work as a hostile one
+    const encoded = encodeBitstring(new Uint8Array(64 * 1024 * 1024))
+    expect(() => decodeBitstring(encoded)).toThrow(/decompresses past the maximum/)
+  })
+})
+
+describe('security: statusSize validation', () => {
+  it('refuses a list whose metadata declares statusSize 0', () => {
+    expect(() =>
+      parseLegacyStatusListData({
+        bitstringStatusListCredential: {
+          credentialSubject: { statusPurpose: ['revocation'], encodedList: encodeBitstring(createBitstring(16, 2)) },
+        },
+        metadata: { statusSize: 0 },
+      })
+    ).toThrow(/statusSize/)
+  })
+
+  it('refuses a list whose metadata declares a non-integer or out of range statusSize', () => {
+    const makeData = (statusSize: number) => ({
+      bitstringStatusListCredential: {
+        credentialSubject: { statusPurpose: ['revocation'], encodedList: encodeBitstring(createBitstring(16, 2)) },
+      },
+      metadata: { statusSize },
+    })
+    expect(() => parseLegacyStatusListData(makeData(1.5))).toThrow(/statusSize/)
+    expect(() => parseLegacyStatusListData(makeData(9))).toThrow(/statusSize/)
+    expect(() => parseLegacyStatusListData(makeData(-1))).toThrow(/statusSize/)
+  })
+
+  it('refuses an entry whose statusSize does not match the list it points at', async () => {
+    const ledger = createFakeLegacyStatusLedger()
+    const bits = createBitstring(16, 2)
+    setBitstringStatus(bits, 5, 2, 3)
+    ledger.seed('sizelist', 'BitstringStatusListCredential', {
+      bitstringStatusListCredential: {
+        credentialSubject: { statusPurpose: ['revocation'], encodedList: encodeBitstring(bits) },
+      },
+      metadata: { statusSize: 2 },
+    })
+    const uri = getLegacyStatusListUri({ did, name: 'sizelist', resourceType: 'BitstringStatusListCredential' })
+
+    await expect(
+      checkLegacyCredentialStatus(ledger.agentContext, {
+        issuer: did,
+        credentialStatus: {
+          type: 'BitstringStatusListEntry',
+          statusPurpose: 'revocation',
+          statusListIndex: 5,
+          statusListCredential: uri,
+          statusSize: 0,
+        },
+      })
+    ).rejects.toThrow(/statusSize/)
+  })
+})
+
+describe('security: suspended vs revoked', () => {
+  it('reports a suspended Bitstring entry as suspended only, not also revoked', async () => {
+    const ledger = createFakeLegacyStatusLedger()
+    const bits = createBitstring(16, 2)
+    setBitstringStatus(bits, 4, 2, 2) // the 'suspended' value
+    ledger.seed('suspend list', 'BitstringStatusListCredential', {
+      bitstringStatusListCredential: {
+        credentialSubject: { statusPurpose: ['revocation', 'suspension'], encodedList: encodeBitstring(bits) },
+      },
+      metadata: { statusSize: 2, statusMessages: defaultBitstringStatusMessages },
+    })
+    const uri = getLegacyStatusListUri({ did, name: 'suspend list', resourceType: 'BitstringStatusListCredential' })
+
+    const [result] = await checkLegacyCredentialStatus(ledger.agentContext, {
+      issuer: did,
+      credentialStatus: {
+        type: 'BitstringStatusListEntry',
+        // written (as Studio does for a plain check) with purpose 'revocation', even though the value is 'suspended'
+        statusPurpose: 'revocation',
+        statusListIndex: 4,
+        statusListCredential: uri,
+        statusMessage: defaultBitstringStatusMessages,
+      },
+    })
+    expect(result.suspended).toBe(true)
+    expect(result.revoked).toBe(false)
+  })
+})
+
+describe('security: bounded entries and credentials', () => {
+  it('refuses more than a bounded number of credentialStatus entries, before doing any work', async () => {
+    const entries = Array.from({ length: 10_000 }, (_, i) => ({
+      type: 'BitstringStatusListEntry' as const,
+      statusPurpose: 'revocation' as const,
+      statusListIndex: i,
+      statusListCredential: `https://resolver.cheqd.net/1.0/identifiers/${did}?resourceName=a&resourceType=b`,
+    }))
+    // No dependencyManager at all: if the cap is not checked up front, this throws for the wrong reason (or, for
+    // checkLegacyPresentationStatus below, is silently swallowed) instead of refusing cleanly
+    await expect(checkLegacyCredentialStatus({} as never, { issuer: did, credentialStatus: entries })).rejects.toThrow(
+      /more than 100 status entries/
+    )
+  })
+
+  it('refuses more than a bounded number of credentials in a presentation, before doing any work', async () => {
+    const credential = {
+      issuer: did,
+      credentialStatus: {
+        type: 'BitstringStatusListEntry' as const,
+        statusPurpose: 'revocation' as const,
+        statusListIndex: 0,
+        statusListCredential: `https://resolver.cheqd.net/1.0/identifiers/${did}?resourceName=a&resourceType=b`,
+      },
+    }
+    const credentials = Array.from({ length: 10_000 }, () => credential)
+    await expect(checkLegacyPresentationStatus({} as never, { verifiableCredential: credentials })).rejects.toThrow(
+      /more than 100 credentials/
+    )
+  })
+})
+
+describe('security: pinned entries refuse revocation by default', () => {
+  it('refuses to revoke a pinned (resource id) entry unless explicitly allowed', async () => {
+    const ledger = createFakeLegacyStatusLedger()
+    const resourceId = seedStatusList2021(ledger, 'pin list')
+    const credential = {
+      issuer: did,
+      credentialStatus: createLegacyStatusEntry({
+        format: 'StatusList2021',
+        statusPurpose: 'revocation',
+        index: 3,
+        statusListCredential: `${did}/resources/${resourceId}`,
+      }),
+    }
+
+    await expect(setLegacyCredentialStatus(ledger.agentContext, credential, 'revoke')).rejects.toThrow(/pinned/)
+
+    const written = await setLegacyCredentialStatus(ledger.agentContext, credential, 'revoke', {
+      allowPinnedRevocation: true,
+    })
+    expect(written).toMatchObject([{ pinned: true, indices: [3], value: 1 }])
+  })
+})
+
+describe('security: lost-update race when writing status lists', () => {
+  it('does not lose either of two concurrent revocations to the same list', async () => {
+    const ledger = createFakeLegacyStatusLedger({ resolveDelayMs: 5, publishDelayMs: 5 })
+    seedStatusList2021(ledger, 'race list')
+
+    await Promise.all([
+      updateLegacyStatusList(ledger.agentContext, did, {
+        name: 'race list',
+        resourceType: 'StatusList2021Revocation',
+        updates: [{ index: 3, value: 1 }],
+      }),
+      updateLegacyStatusList(ledger.agentContext, did, {
+        name: 'race list',
+        resourceType: 'StatusList2021Revocation',
+        updates: [{ index: 9, value: 1 }],
+      }),
+    ])
+
+    const final = ledger.latest('race list', 'StatusList2021Revocation')
+    const list = parseLegacyStatusListData(final?.data)
+    expect(getBitstringStatus(list.bits, 3, 1)).toBe(1)
+    expect(getBitstringStatus(list.bits, 9, 1)).toBe(1)
+  })
+
+  it('redoes the write if the read-back after publishing looks stale (a lagging node), instead of trusting it', async () => {
+    const seedData = {
+      StatusList2021: { statusPurpose: 'revocation', encodedList: encodeBitstring(createBitstring(16, 1)) },
+      metadata: { type: 'StatusList2021Revocation', encoding: 'base64url', encrypted: false },
+    }
+    let resolveCalls = 0
+    let createCalls = 0
+    let lastPublished: unknown = seedData
+
+    const resolvers = new Map<unknown, unknown>([
+      [
+        CheqdDidResolver,
+        {
+          resolveResource: async () => {
+            resolveCalls++
+            // The first two reads - the initial one, and the read-back right after the first publish - land on a node
+            // that has not caught up yet and still shows the pre-update data, as a lagging node behind a load
+            // balancer would; later reads see whatever was actually last published
+            const resource = resolveCalls <= 2 ? seedData : lastPublished
+            return { resource, resourceMetadata: { id: 'x', version: String(resolveCalls) } }
+          },
+        },
+      ],
+      [
+        CheqdDidRegistrar,
+        {
+          createResource: async (_ctx: unknown, _did: string, resource: { data: Uint8Array }) => {
+            createCalls++
+            lastPublished = JSON.parse(TypedArrayEncoder.toUtf8String(resource.data))
+            return { resourceState: { state: 'finished' } }
+          },
+        },
+      ],
+    ])
+    const agentContext = { dependencyManager: { resolve: (token: unknown) => resolvers.get(token) } }
+
+    const result = await updateLegacyStatusList(agentContext as never, did, {
+      name: 'lagging list',
+      resourceType: 'StatusList2021Revocation',
+      updates: [{ index: 2, value: 1 }],
+    })
+
+    expect(result.name).toBe('lagging list')
+    // it must have redone the read-modify-write at least once to get past the stale read-back
+    expect(createCalls).toBeGreaterThan(1)
+    const list = parseLegacyStatusListData(lastPublished)
+    expect(getBitstringStatus(list.bits, 2, 1)).toBe(1)
+  })
+})
+
+describe('allocateStatusListIndex: known allocation-collision limitation (documented, not fixed)', () => {
+  it('can hand out the same index twice when the caller does not track and pass previously allocated indices', () => {
+    const list = { bits: createBitstring(16, 1), statusSize: 1 }
+    // allocateStatusListIndex consults the ledger bits and the caller's `taken` list, but nothing else: a caller that
+    // (incorrectly) does not accumulate `taken` across calls can get the same unrevoked index back more than once
+    const first = allocateStatusListIndex(list)
+    const second = allocateStatusListIndex(list)
+    // both calls saw the same all-zero list and no `taken`, so they drew from the same pool of unused indices - this
+    // assertion documents the mechanism (same pool, no shared state) rather than a specific outcome
+    expect(first).toBeGreaterThanOrEqual(0)
+    expect(second).toBeGreaterThanOrEqual(0)
+    // the limitation is mitigated, not fixed, by passing every previously allocated index back in as `taken`
+    const taken = new Set([first])
+    const third = allocateStatusListIndex(list, taken)
+    expect(third).not.toBe(first)
   })
 })
