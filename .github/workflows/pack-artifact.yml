@@ -1,0 +1,53 @@
+name: Pack artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Workspace package to build and pack, e.g. @credo-ts/cheqd or @credo-ts/core"
+        required: true
+        default: "@credo-ts/cheqd"
+
+# No npm credentials used or required: this builds and packs the requested package into a plain
+# npm tarball (workspace:*/catalog: specifiers already resolved) and uploads it as a workflow
+# artifact. It does not publish anywhere. For anyone who needs to consume a cheqd/credo-ts
+# package before the equivalent change lands in the real @credo-ts/* release (see the open PRs
+# upstream), this is the supported route: run this workflow, download the artifact, `npm install
+# ./<package>.tgz` — not a git-ref install, which breaks on this repo's workspace:*/catalog:
+# specifiers, and not a published package under a cheqd-owned npm scope, which this repo has no
+# credentials or naming decision for.
+jobs:
+  pack:
+    name: "Build & pack ${{ inputs.package }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22.22.1"
+
+      # Reads the pinned version from this repo's own package.json "packageManager" field, so the
+      # build always runs under the exact pnpm version this repo is built against - a version
+      # mismatch here (an older pnpm misreading a newer lockfile format) looks identical to a
+      # corrupted lockfile, and isn't.
+      - name: Enable Corepack and install the pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the requested package
+        run: pnpm --filter "${{ inputs.package }}" build
+
+      - name: Pack the requested package
+        run: pnpm --filter "${{ inputs.package }}" pack --pack-destination ./artifact-tarball
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-tarball
+          path: ./artifact-tarball/*.tgz
+          retention-days: 30
