@@ -39,14 +39,15 @@ function messageValue(messages: LegacyStatusMessage[] | undefined, message: stri
  *   `reinstate` clears a suspension entry. A revocation is not undone.
  * - Bitstring: revoke is the value of the message `revoked` (1), suspend of `suspended` (2), reinstate is 0.
  *
- * An entry may name its list by resource id. The change is still written to the latest version of that list, but the
- * entry keeps pointing at the old, immutable version (`pinned`).
+ * An entry may name its list by resource id ('pinned'). The change would still be written to the latest version of
+ * that list, but the entry itself keeps pointing at the old, immutable version, so nothing checking status by that
+ * entry would ever see the change - this is refused by default; pass `allowPinnedRevocation: true` to do it anyway.
  */
 export async function setLegacyCredentialStatus(
   agentContext: AgentContext,
   credential: LegacyStatusCredential,
   action: LegacyStatusAction,
-  options: { maxIndices?: number } = {}
+  options: { maxIndices?: number; allowPinnedRevocation?: boolean } = {}
 ) {
   const { issuer, credentialStatus } = asStatusInput(credential)
   const issuerDid = typeof issuer === 'string' ? issuer : issuer.id
@@ -71,6 +72,19 @@ export async function setLegacyCredentialStatus(
       throw new CredoError(`The status list is a resource of ${list.did}, not of the issuer ${issuerDid}`)
     }
 
+    const pinned = 'resourceId' in list
+    if (pinned && !options.allowPinnedRevocation) {
+      // The change is written to the latest version of the list either way, but this entry names one fixed version by
+      // resource id: a credential checking its status by this uri will keep reading that pinned version forever, so
+      // the write below would succeed while never actually being observed by anyone relying on this entry. Refuse
+      // unless the caller has explicitly decided that is fine (for example, they also hold the current, non-pinned uri).
+      throw new CredoError(
+        `'${entry.statusListCredential}' names the status list by resource id (pinned): a credential checking this ` +
+          `entry's status will keep reading that version and will never see this ${action}. Pass ` +
+          'allowPinnedRevocation: true to write it anyway.'
+      )
+    }
+
     let value: number
     if (entry.type === 'StatusList2021Entry') {
       if (action === 'revoke' && entry.statusPurpose === 'revocation') value = 1
@@ -91,7 +105,6 @@ export async function setLegacyCredentialStatus(
 
     const indices = expandLegacyStatusIndices(entry, options.maxIndices)
     const updates = indices.map((index) => ({ index, value }))
-    const pinned = 'resourceId' in list
     const updated = await updateLegacyStatusList(
       agentContext,
       list.did,
@@ -114,6 +127,12 @@ export interface LegacyPresentationStatus {
 }
 
 /**
+ * A presentation comes from whoever it is shown by: nothing otherwise bounds how many credentials it bundles, and each
+ * one is checked in full (fetching and decoding every list it names). This caps that count before any of it is done.
+ */
+export const defaultMaxCredentialsPerPresentation = 100
+
+/**
  * Reads the status of every credential of a presentation. A credential without a `credentialStatus` has nothing to
  * check. A credential whose status cannot be read (a list that is missing, that is not the issuer's, or that is
  * encrypted) is reported with its error and makes the presentation not valid, so it does not hide the others.
@@ -123,7 +142,7 @@ export interface LegacyPresentationStatus {
 export async function checkLegacyPresentationStatus(
   agentContext: AgentContext,
   presentation: { verifiableCredential?: LegacyStatusCredential | LegacyStatusCredential[] },
-  options: { maxIndices?: number } = {}
+  options: { maxIndices?: number; maxCredentials?: number } = {}
 ): Promise<LegacyPresentationStatus> {
   const credentials = Array.isArray(presentation.verifiableCredential)
     ? presentation.verifiableCredential
@@ -131,6 +150,10 @@ export async function checkLegacyPresentationStatus(
       ? [presentation.verifiableCredential]
       : []
   if (credentials.length === 0) throw new CredoError('The presentation has no credentials')
+  const maxCredentials = options.maxCredentials ?? defaultMaxCredentialsPerPresentation
+  if (credentials.length > maxCredentials) {
+    throw new CredoError(`The presentation has more than ${maxCredentials} credentials`)
+  }
 
   const status: LegacyPresentationStatus = { valid: true, revoked: false, suspended: false, credentials: [] }
   for (const [index, credential] of credentials.entries()) {
