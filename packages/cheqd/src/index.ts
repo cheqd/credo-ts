@@ -1,6 +1,5 @@
 // Dids
 
-export * from './agent-id'
 export { CheqdModule } from './CheqdModule'
 export { CheqdModuleConfig, type CheqdModuleConfigOptions } from './CheqdModuleConfig'
 export {
