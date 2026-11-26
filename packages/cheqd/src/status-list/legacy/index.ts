@@ -1,12 +1,14 @@
 export {
   createBitstring,
   decodeBitstring,
+  defaultMaxDecodedBitstringBytes,
   encodeBitstring,
   getBitstringStatus,
   setBitstringStatus,
 } from './bitstring'
 export {
   checkLegacyPresentationStatus,
+  defaultMaxCredentialsPerPresentation,
   type LegacyPresentationStatus,
   type LegacyStatusAction,
   type LegacyStatusCredential,
@@ -14,6 +16,7 @@ export {
 } from './legacyCredentialStatus'
 export {
   allocateStatusListIndex,
+  assertValidStatusSize,
   type CreateLegacyStatusListOptions,
   checkLegacyCredentialStatus,
   createLegacyStatusEntry,
@@ -22,6 +25,7 @@ export {
   defaultBitstringStatusMessages,
   defaultBitstringStatusSize,
   defaultLegacyStatusListResolverUrl,
+  defaultMaxStatusEntriesPerCredential,
   defaultMaxStatusIndices,
   defaultStatusList2021Length,
   expandLegacyStatusIndices,
