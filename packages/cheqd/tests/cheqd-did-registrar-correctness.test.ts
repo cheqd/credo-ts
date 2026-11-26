@@ -1,13 +1,6 @@
 import type { DidFeeOptions, DidStdFee } from '@cheqd/sdk'
-import {
-  DidDocumentBuilder,
-  DidDocumentRole,
-  DidRecord,
-  DidRepository,
-  getJsonWebKey2020,
-  Kms,
-} from '@credo-ts/core'
 import type { DidDocumentKey } from '@credo-ts/core'
+import { DidDocumentBuilder, DidDocumentRole, DidRecord, DidRepository, getJsonWebKey2020, Kms } from '@credo-ts/core'
 
 import { getAgentContext } from '../../core/tests/helpers'
 import { CheqdDidRegistrar } from '../src'
