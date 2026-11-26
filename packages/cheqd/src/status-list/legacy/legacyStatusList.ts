@@ -135,6 +135,17 @@ function asArray<T>(value: T | T[] | undefined): T[] {
   return value === undefined ? [] : Array.isArray(value) ? value : [value]
 }
 
+/**
+ * Valid sizes for a Bitstring entry: an integer from 1 to 8 bits. Anything else is not just invalid but dangerous -
+ * `statusSize: 0` in particular makes every index read as status 0 ('valid'), including on a fully revoked list, since
+ * the range check and the bit read both degenerate when the size is 0.
+ */
+export function assertValidStatusSize(statusSize: number, context: string): void {
+  if (!Number.isInteger(statusSize) || statusSize < 1 || statusSize > 8) {
+    throw new CredoError(`${context} must be an integer from 1 to 8, got ${statusSize}`)
+  }
+}
+
 /** Reads the stored data of a status list resource of either format */
 export function parseLegacyStatusListData(data: unknown): Omit<LegacyStatusList, 'did' | 'resourceId' | 'version'> {
   const record = (data ?? {}) as Record<string, unknown>
@@ -161,11 +172,13 @@ export function parseLegacyStatusListData(data: unknown): Omit<LegacyStatusList,
     }
     const subject = credential.credentialSubject
     if (!subject?.encodedList) throw new CredoError('The status list has no encodedList')
+    const statusSize = metadata.statusSize ?? defaultBitstringStatusSize
+    assertValidStatusSize(statusSize, "The status list's statusSize")
     return {
       format: 'BitstringStatusList',
       purposes: asArray(subject.statusPurpose),
       bits: decodeBitstring(subject.encodedList),
-      statusSize: metadata.statusSize ?? defaultBitstringStatusSize,
+      statusSize,
       statusMessages: metadata.statusMessages,
     }
   }
@@ -224,6 +237,12 @@ function didOfIssuer(issuer: string | { id: string }) {
 export const defaultMaxStatusIndices = 10_000
 
 /**
+ * A credential comes from whoever issued it: nothing otherwise bounds how many `credentialStatus` entries it declares,
+ * and each one triggers a network fetch and a decode of its list. This caps that count before any of it is done.
+ */
+export const defaultMaxStatusEntriesPerCredential = 100
+
+/**
  * The indices an entry asks about: its `statusListIndex`, its `statusListIndices` (numbers, numeric strings or ranges
  * like `'5-10'`) and its `statusListRangeStart` to `statusListRangeEnd`, each once, in order. The number is capped: an
  * entry comes from a credential someone else issued, and a range of millions would otherwise be read for it.
@@ -236,10 +255,15 @@ export function expandLegacyStatusIndices(
   maxIndices = defaultMaxStatusIndices
 ): number[] {
   const indices = new Set<number>()
+  // Counts every index considered, not just the unique ones kept in `indices`: many overlapping ranges (for example
+  // 2,000 copies of '0-9999') would otherwise each walk in full before the final, deduplicated size is checked, doing
+  // unbounded work despite returning a small result. Capping the raw count bounds the work itself.
+  let seen = 0
   const add = (index: number) => {
     if (!Number.isInteger(index) || index < 0) throw new CredoError(`Invalid status list index ${index}`)
+    seen++
+    if (seen > maxIndices) throw new CredoError(`A status entry asks about more than ${maxIndices} indices`)
     indices.add(index)
-    if (indices.size > maxIndices) throw new CredoError(`A status entry asks about more than ${maxIndices} indices`)
   }
   const addRange = (start: number, end: number) => {
     const low = Math.min(start, end)
@@ -284,12 +308,18 @@ export function expandLegacyStatusIndices(
 export async function checkLegacyCredentialStatus(
   agentContext: AgentContext,
   credential: { issuer: string | { id: string }; credentialStatus?: LegacyStatusEntry | LegacyStatusEntry[] },
-  options: { requireIssuerMatch?: boolean; maxIndices?: number } = {}
+  options: { requireIssuerMatch?: boolean; maxIndices?: number; maxEntries?: number } = {}
 ): Promise<LegacyStatusResult[]> {
   const issuer = didOfIssuer(credential.issuer)
+  const entries = asArray(credential.credentialStatus)
+  const maxEntries = options.maxEntries ?? defaultMaxStatusEntriesPerCredential
+  if (entries.length > maxEntries) {
+    throw new CredoError(`The credential has more than ${maxEntries} status entries`)
+  }
+
   const results: LegacyStatusResult[] = []
 
-  for (const entry of asArray(credential.credentialStatus)) {
+  for (const entry of entries) {
     if (entry.type !== 'StatusList2021Entry' && entry.type !== 'BitstringStatusListEntry') {
       throw new CredoError(`Unsupported credential status type '${entry.type}'`)
     }
@@ -307,12 +337,30 @@ export async function checkLegacyCredentialStatus(
       throw new CredoError(`The status list does not have the purpose '${entry.statusPurpose}'`)
     }
 
+    // The entry's own statusSize, if present, must agree with what the list declares: otherwise the entry would
+    // silently override the size the list was actually encoded with (and an unchecked size, notably 0, would make
+    // every index read as status 0 - 'valid' - even on a fully revoked list).
+    if (entry.statusSize !== undefined && entry.statusSize !== list.statusSize) {
+      throw new CredoError(
+        `The entry's statusSize (${entry.statusSize}) does not match the status list's statusSize (${list.statusSize})`
+      )
+    }
     const statusSize = entry.statusSize ?? list.statusSize
+    assertValidStatusSize(statusSize, "The status entry's statusSize")
+
     for (const index of expandLegacyStatusIndices(entry, options.maxIndices)) {
       const status = getBitstringStatus(list.bits, index, statusSize)
       const message = (list.statusMessages ?? entry.statusMessage)?.find(
         (candidate) => candidate.status === `0x${status.toString(16)}`
       )?.message
+
+      // A list with messages is explicit about what a value means: trust that over the entry's own purpose, so a
+      // suspended value is not also reported as revoked just because this entry was written with purpose
+      // 'revocation'. Without messages (StatusList2021 never has any), the purpose is all there is to go on.
+      const revoked =
+        message !== undefined ? message === 'revoked' : entry.statusPurpose === 'revocation' && status !== 0
+      const suspended =
+        message !== undefined ? message === 'suspended' : entry.statusPurpose === 'suspension' && status !== 0
 
       results.push({
         type: entry.type,
@@ -320,8 +368,8 @@ export async function checkLegacyCredentialStatus(
         statusListIndex: index,
         status,
         valid: status === 0,
-        revoked: (entry.statusPurpose === 'revocation' && status !== 0) || message === 'revoked',
-        suspended: (entry.statusPurpose === 'suspension' && status !== 0) || message === 'suspended',
+        revoked,
+        suspended,
         message,
         statusListCredential: entry.statusListCredential,
         resourceId: list.resourceId,
@@ -332,7 +380,20 @@ export async function checkLegacyCredentialStatus(
   return results
 }
 
-/** Picks a random entry that is unset and not in `taken`, so credentials cannot be correlated by their index */
+/**
+ * Picks a random entry that is unset and not in `taken`, so credentials cannot be correlated by their index.
+ *
+ * Known limitation: nothing here is persisted. An index that was allocated to a credential that has not yet been
+ * revoked (so its bit is still unset) looks exactly like an unused one to the next call, unless the caller also passes
+ * it in `taken`. Collisions are then a straightforward birthday-problem calculation: on the default 131,072 entry
+ * Bitstring list, the chance of two callers colliding reaches roughly 50% after about 425 allocations, growing from
+ * there. A real fix needs a store of allocated-but-unrevoked indices - for example a repository keyed by the list's
+ * resource id - that every caller consults before issuing a credential and updates as part of issuance; which store,
+ * and how it is kept consistent with issuance across possibly many agent instances, is an application-level design
+ * decision this package cannot make for every caller, so it is out of scope for this fix. Callers that issue more than
+ * a handful of credentials per list should track the indices they allocate themselves and pass them all as `taken`, or
+ * use a list large enough that the collision risk at their issuance rate is acceptable.
+ */
 export function allocateStatusListIndex(
   list: Pick<LegacyStatusList, 'bits' | 'statusSize'>,
   taken: Iterable<number> = []
@@ -499,9 +560,42 @@ export async function createLegacyStatusList(
 }
 
 /**
+ * Chains writers to the same list so two concurrent revocations cannot both read the same version and silently drop
+ * one another's change: the ledger has no compare-and-swap, so without this, "last publish wins" and whichever call
+ * published first is lost. Keyed by did + name + resourceType, since a write is always based on the latest version
+ * under that name however the caller identified the list (by name or by a pinned resource id).
+ */
+const updateLocks = new Map<string, Promise<unknown>>()
+
+function withListLock<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const previous = updateLocks.get(key) ?? Promise.resolve()
+  const settled = previous.then(run, run)
+  // Never let a rejected write jam the queue for the next caller on the same list
+  updateLocks.set(
+    key,
+    settled.then(
+      () => undefined,
+      () => undefined
+    )
+  )
+  return settled
+}
+
+/**
+ * How many times to redo the whole read-modify-write if the read-back after publishing does not show every intended
+ * bit set. This guards against a read - the initial one, or the one verifying the publish - landing on a lagging RPC
+ * node behind a load balancer, which would otherwise look exactly like another writer's lost update, even with the
+ * lock above and even for a single, sequential caller.
+ */
+const maxUpdateAttempts = 3
+
+/**
  * Sets entries of the latest version of a list and publishes the result as a new version under the same name. Use value
  * 1 to revoke (or suspend) and 0 to reinstate on a StatusList2021 list, and the message values of the list on a Bitstring
  * list (by default 1 revoked, 2 suspended).
+ *
+ * Writes to the same list (by did, name and resourceType) are serialised in-process, and every publish is read back and
+ * checked before this resolves - see {@link withListLock} and {@link maxUpdateAttempts}.
  */
 export async function updateLegacyStatusList(
   agentContext: AgentContext,
@@ -513,7 +607,8 @@ export async function updateLegacyStatusList(
   const resolver = agentContext.dependencyManager.resolve(CheqdDidResolver)
 
   // A resource id is only used to find the list: it may be an older version, and writing on top of it would drop
-  // the changes made since. The update is always based on the latest version of the list.
+  // the changes made since. The update is always based on the latest version of the list. This lookup is read-only
+  // and does not race anything, so it happens before the lock below.
   let name: string
   let resourceType: string
   if ('resourceId' in options) {
@@ -529,23 +624,51 @@ export async function updateLegacyStatusList(
   }
 
   const uri = getLegacyStatusListUri({ did, name, resourceType })
-  const result = await resolver.resolveResource(
-    agentContext,
-    `${did}?resourceName=${encodeURIComponent(name)}&resourceType=${encodeURIComponent(resourceType)}`
-  )
-  if (result.error || result.resource === undefined) {
-    throw new CredoError(`Unable to read the status list ${uri}: ${result.message ?? result.error}`)
-  }
+  const latestDidUrl = `${did}?resourceName=${encodeURIComponent(name)}&resourceType=${encodeURIComponent(resourceType)}`
 
-  // Keep everything else in the stored data as it is, and only replace the list
-  const data = JSON.parse(JSON.stringify(result.resource)) as Record<string, Record<string, unknown>>
-  const list = parseLegacyStatusListData(data)
-  for (const { index, value } of options.updates) setBitstringStatus(list.bits, index, list.statusSize, value)
-  const encodedList = encodeBitstring(list.bits)
+  return withListLock(`${did}::${name}::${resourceType}`, async () => {
+    let lastProblem = 'the read-back could not be read'
 
-  if (data.StatusList2021) data.StatusList2021.encodedList = encodedList
-  else (data.bitstringStatusListCredential.credentialSubject as { encodedList: string }).encodedList = encodedList
+    for (let attempt = 1; attempt <= maxUpdateAttempts; attempt++) {
+      const result = await resolver.resolveResource(agentContext, latestDidUrl)
+      if (result.error || result.resource === undefined) {
+        throw new CredoError(`Unable to read the status list ${uri}: ${result.message ?? result.error}`)
+      }
 
-  const { resourceId } = await publish(agentContext, did, { name, resourceType, data })
-  return { resourceId, name, resourceType }
+      // Keep everything else in the stored data as it is, and only replace the list
+      const data = JSON.parse(JSON.stringify(result.resource)) as Record<string, Record<string, unknown>>
+      const list = parseLegacyStatusListData(data)
+      for (const { index, value } of options.updates) setBitstringStatus(list.bits, index, list.statusSize, value)
+      const encodedList = encodeBitstring(list.bits)
+
+      if (data.StatusList2021) data.StatusList2021.encodedList = encodedList
+      else (data.bitstringStatusListCredential.credentialSubject as { encodedList: string }).encodedList = encodedList
+
+      const { resourceId } = await publish(agentContext, did, { name, resourceType, data })
+
+      // Confirm every bit this call intended to set reads back as intended before trusting the write: the ledger has
+      // no compare-and-swap, so a concurrent writer (or a lagging read, on either side of this call) can silently
+      // clobber what was just published.
+      const readBack = await resolver.resolveResource(agentContext, latestDidUrl)
+      if (!readBack.error && readBack.resource !== undefined) {
+        try {
+          const readList = parseLegacyStatusListData(readBack.resource)
+          const mismatch = options.updates.find(
+            ({ index, value }) => getBitstringStatus(readList.bits, index, readList.statusSize) !== value
+          )
+          if (!mismatch) return { resourceId, name, resourceType }
+          lastProblem = `index ${mismatch.index} reads back as ${getBitstringStatus(readList.bits, mismatch.index, readList.statusSize)}, not the intended ${mismatch.value}`
+        } catch (error) {
+          lastProblem = `the read-back could not be parsed: ${error}`
+        }
+      } else {
+        lastProblem = `the read-back failed: ${readBack.message ?? readBack.error}`
+      }
+    }
+
+    throw new CredoError(
+      `Unable to confirm the status list ${uri} was updated after ${maxUpdateAttempts} attempts (${lastProblem}). ` +
+        'Another writer may be racing this update, or a read landed on a lagging node.'
+    )
+  })
 }
