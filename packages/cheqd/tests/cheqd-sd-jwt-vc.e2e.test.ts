@@ -14,7 +14,7 @@ import {
 
 import { getAgentOptions } from '../../core/tests/helpers'
 import type { CheqdDidCreateOptions } from '../src'
-import { createCheqdStatusListFetcher, createLegacyStatusEntry } from '../src'
+import { createCheqdStatusListFetcher, createLegacyStatusEntry, setLegacyCredentialStatus } from '../src'
 import { cheqdPayerSeeds, getCheqdModules } from './setupCheqdModule'
 
 // Payer seed [4] is unused elsewhere, and shared by the describes in this file, which run in order. The holder has no
@@ -490,7 +490,12 @@ describe('StatusList2021 and Bitstring status lists stored as did:cheqd linked r
         updates: [{ index: 8, value: 1 }],
       })
 
-      const written = await sdk().setLegacyCredentialStatus(pinned, 'revoke')
+      // revoking a pinned entry is refused by default: a credential checking status by the pinned uri would never see
+      // the change, so the write below opts in explicitly to exercise the mechanics
+      await expect(sdk().setLegacyCredentialStatus(pinned, 'revoke')).rejects.toThrow('pinned')
+      const written = await setLegacyCredentialStatus(issuer.context, pinned, 'revoke', {
+        allowPinnedRevocation: true,
+      })
       expect(written).toMatchObject([{ did, name: 'pinned revocation', indices: [7], value: 1, pinned: true }])
       expect(written[0].resourceId).not.toBe(created.resourceId)
 

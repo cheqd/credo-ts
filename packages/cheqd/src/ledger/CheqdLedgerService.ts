@@ -57,11 +57,35 @@ export class CheqdLedgerService {
 
   public async disconnect() {
     for (const network of this.networks) {
-      const _a = await network.sdk
-      if (!network.sdk) {
-        await this.initializeSdkForNetwork(network)
-      } else {
-        this.logger.debug(`Not connecting to network ${network} as SDK already initialized`)
+      if (!network.sdk) continue
+
+      // Release the slot immediately so a subsequent connect()/getSdk() call creates a fresh
+      // setup rather than reusing a client we are about to tear down.
+      const sdkPromise = network.sdk
+      network.sdk = undefined
+
+      let sdk: CheqdSDK | undefined
+      try {
+        sdk = await sdkPromise
+      } catch {
+        // Setup for this network had already failed; nothing to tear down.
+        continue
+      }
+      if (!sdk) continue
+
+      try {
+        sdk.signer.disconnect()
+      } catch (error) {
+        this.logger.debug(`Error disconnecting cheqd signer for network ${network.network}`, { error })
+      }
+
+      // CheqdSDK does not expose a public way to close the querier's own RPC connection, so
+      // release it defensively if the runtime object happens to expose one.
+      const querier = sdk.querier as unknown as { cometClient?: { disconnect?: () => void } }
+      try {
+        querier?.cometClient?.disconnect?.()
+      } catch (error) {
+        this.logger.debug(`Error disconnecting cheqd querier for network ${network.network}`, { error })
       }
     }
   }
@@ -95,22 +119,37 @@ export class CheqdLedgerService {
   }
 
   private async initializeSdkForNetwork(network: ICheqdLedgerConfig) {
-    try {
-      // Initialize cheqd sdk with promise
-      network.sdk = createCheqdSDK({
-        modules: [DIDModule as unknown as AbstractCheqdSDKModule, ResourceModule as unknown as AbstractCheqdSDKModule],
-        rpcUrl: network.rpcUrl,
-        wallet: await network.cosmosPayerWallet.catch((error) => {
-          throw new CredoError(`Error initializing cosmos payer wallet: ${error.message}`, { cause: error })
-        }),
+    // Build the setup as its own promise and assign it to `network.sdk` synchronously, before
+    // awaiting anything below. This closes the race where concurrent first calls for the same
+    // network would each see `network.sdk` as unset (since it was previously only assigned
+    // *after* awaiting the wallet) and each go on to create their own SDK/RPC client. With the
+    // assignment happening synchronously here, only the first caller starts a setup; every
+    // other concurrent caller observes `network.sdk` already set and shares this same promise.
+    const sdkPromise = (async () => {
+      const wallet = await network.cosmosPayerWallet.catch((error) => {
+        throw new CredoError(`Error initializing cosmos payer wallet: ${error.message}`, { cause: error })
       })
 
-      return await network.sdk
+      return createCheqdSDK({
+        modules: [DIDModule as unknown as AbstractCheqdSDKModule, ResourceModule as unknown as AbstractCheqdSDKModule],
+        rpcUrl: network.rpcUrl,
+        wallet,
+      })
+    })()
+    network.sdk = sdkPromise
+
+    try {
+      return await sdkPromise
     } catch (error) {
       this.logger.error(
         `Skipping connection for network ${network.network} in cheqd sdk due to error in initialization: ${error.message}`
       )
-      network.sdk = undefined
+      // Only clear the slot if it still holds *this* failed attempt. A concurrent call may have
+      // already replaced it with a different (possibly successful) setup, and we must not wipe
+      // that out.
+      if (network.sdk === sdkPromise) {
+        network.sdk = undefined
+      }
       return undefined
     }
   }
