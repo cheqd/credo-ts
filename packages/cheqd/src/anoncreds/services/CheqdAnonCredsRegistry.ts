@@ -453,6 +453,17 @@ export class CheqdAnonCredsRegistry implements AnonCredsRegistry {
       if (response.error) throw new Error(`${response.error}: ${response.message}`)
       const revocationStatusList = JsonTransformer.fromJSON(response.resource, CheqdRevocationStatusList)
 
+      // The status list resource is looked up by name only (schema + cred def tag + rev reg tag), which
+      // is not guaranteed to be unique: two revocation registries can resolve to the same resource name
+      // (e.g. the same schema/cred def/rev reg tags reused across schema versions), and the closest-version
+      // lookup can then return a status list belonging to a DIFFERENT revocation registry. Verify the
+      // embedded revRegDefId actually matches what was requested, and fail closed if it doesn't.
+      if (revocationStatusList.revRegDefId !== revocationRegistryId) {
+        throw new CredoError(
+          `Revocation status list resource for '${revocationRegistryId}' at timestamp ${timestamp} actually belongs to revocation registry definition '${revocationStatusList.revRegDefId}'. Refusing to use mismatched status list.`
+        )
+      }
+
       const statusListTimestamp = response.resourceMetadata?.created
         ? Math.floor(response.resourceMetadata.created.getTime() / 1000)
         : undefined
