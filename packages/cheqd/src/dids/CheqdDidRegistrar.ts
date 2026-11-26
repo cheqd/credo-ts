@@ -270,7 +270,13 @@ export class CheqdDidRegistrar implements DidRegistrar {
 
       const signInputs = await this.signPayload(agentContext, payloadToSign, authentication, keys)
 
-      const response = await cheqdLedgerService.create(didDocumentJson, signInputs, versionId)
+      const response = await cheqdLedgerService.create(
+        didDocumentJson,
+        signInputs,
+        versionId,
+        options.options.fee,
+        options.options.feeOptions
+      )
       if (response.code !== 0) {
         throw new Error(`${response.rawLog}`)
       }
@@ -505,7 +511,13 @@ export class CheqdDidRegistrar implements DidRegistrar {
         previousKeys
       )
 
-      const response = await cheqdLedgerService.update(didDocument.toJSON() as DIDDocument, signInputs, versionId)
+      const response = await cheqdLedgerService.update(
+        didDocument.toJSON() as DIDDocument,
+        signInputs,
+        versionId,
+        options.options?.fee,
+        options.options?.feeOptions
+      )
       if (response.code !== 0) {
         throw new Error(`${response.rawLog}`)
       }
@@ -579,7 +591,13 @@ export class CheqdDidRegistrar implements DidRegistrar {
         }
       }
       const signInputs = await this.signPayload(agentContext, payloadToSign, authentication, didRecord.keys)
-      const response = await cheqdLedgerService.deactivate(didDocument, signInputs, versionId)
+      const response = await cheqdLedgerService.deactivate(
+        didDocument,
+        signInputs,
+        versionId,
+        options.options?.fee,
+        options.options?.feeOptions
+      )
       if (response.code !== 0) {
         throw new Error(`${response.rawLog}`)
       }
@@ -648,12 +666,21 @@ export class CheqdDidRegistrar implements DidRegistrar {
       const payloadToSign = MsgCreateResourcePayload.encode(resourcePayload).finish()
 
       const didDocumentInstance = JsonTransformer.fromJSON(didDocument, DidDocument)
-      const signInputs = await this.signPayload(
-        agentContext,
-        payloadToSign,
-        didDocumentInstance.verificationMethod,
-        didRecord.keys
-      )
+      // Only sign with authentication-capable verification methods. The did document may contain
+      // verification methods added by someone else for a different purpose (e.g. assertionMethod
+      // or keyAgreement) that this agent does not hold the key for.
+      const authentication = didDocumentInstance.findVerificationMethodsByPurpose(['authentication'])
+      if (!authentication || authentication.length === 0) {
+        return {
+          resourceMetadata: {},
+          resourceRegistrationMetadata: {},
+          resourceState: {
+            state: 'failed',
+            reason: "No keys to sign with in 'authentication' of DID document",
+          },
+        }
+      }
+      const signInputs = await this.signPayload(agentContext, payloadToSign, authentication, didRecord.keys)
       const response = await cheqdLedgerService.createResource(
         did,
         resourcePayload,

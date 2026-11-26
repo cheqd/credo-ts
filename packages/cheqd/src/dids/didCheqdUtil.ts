@@ -21,7 +21,7 @@ import {
 
 export function validateSpecCompliantPayload(didDocument: DidDocument): SpecValidationResult {
   // id is required, validated on both compile and runtime
-  if (!didDocument.id && !didDocument.id.startsWith('did:cheqd:')) return { valid: false, error: 'id is required' }
+  if (!didDocument.id?.startsWith('did:cheqd:')) return { valid: false, error: 'id is required' }
 
   // verificationMethod is required
   if (!didDocument.verificationMethod) return { valid: false, error: 'verificationMethod is required' }
@@ -191,5 +191,5 @@ export function getCosmosPayerWallet(cosmosPayerSeed?: string) {
   }
   return EnglishMnemonic._mnemonicMatcher.test(cosmosPayerSeed)
     ? DirectSecp256k1HdWallet.fromMnemonic(cosmosPayerSeed, { prefix: 'cheqd' })
-    : DirectSecp256k1Wallet.fromKey(TypedArrayEncoder.fromUtf8String(cosmosPayerSeed.replace(/^0x/, '')), 'cheqd')
+    : DirectSecp256k1Wallet.fromKey(TypedArrayEncoder.fromHex(cosmosPayerSeed.replace(/^0x/, '')), 'cheqd')
 }
